@@ -1,0 +1,13 @@
+[package]
+name = "carrot"
+version = "0.1.0"
+authors = ["gil <gil@redislabs.com>"]
+edition = "2018"
+
+[dependencies]
+log = "0.4.0"
+dirs = "1.0"
+env_logger = "0.6.0"
+rusoto_core = "0.36.0"
+rusoto_ec2 = "0.36.0"
+rusoto_sts = "0.36.0"
