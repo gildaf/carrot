@@ -3,27 +3,36 @@ extern crate rusoto_core;
 extern crate rusoto_ec2;
 extern crate rusoto_cloudtrail;
 
+#[macro_use]
+extern crate futures;
+extern crate tokio;
 //extern crate rusoto_sts;
 
 
 //use std::default::Default;
-
-use std::str;
+use tokio::prelude::*;
+use std::time::Duration;
+use std::{str};
 //use std::collections::HashSet;
 use std::path::PathBuf;
+
 use dirs::home_dir;
 use rusoto_core::{Region, HttpClient, RusotoFuture};
 use rusoto_core::credential::ProfileProvider;
 use rusoto_ec2::{
-    Ec2Client, Ec2, Vpc, Filter,
+    Ec2Client, Ec2,
+//    Filter, Vpc
     DescribeVpcsRequest, DescribeVpcsResult, DescribeVpcsError,
-    DescribeInstancesRequest, DescribeInstancesResult, DescribeInstancesError,
+//    DescribeInstancesRequest, DescribeInstancesResult, DescribeInstancesError,
 };
 use rusoto_cloudtrail::{
-    CloudTrail, CloudTrailClient,
-    LookupEventsRequest, LookupEventsResponse, LookupEventsError,
+    CloudTrailClient,
+    LookupEventsRequest, LookupEventsResponse,
+//    LookupEventsError,
     LookupAttribute, Event
 };
+mod events_stream;
+use events_stream::{GetEvents};
 //use rusoto_sts::{StsClient, StsAssumeRoleSessionCredentialsProvider};
 
 
@@ -61,6 +70,36 @@ fn aws_creds_location() -> Result<PathBuf, &'static str> {
     }
 }
 
+/*
+fn get_all_events(vpc_id: &str, mut getter: GetEvents) {
+    loop {
+        match getter.poll() {
+            Ok(Async::Ready(Some(result))) => {
+                handle_events_future(vpc_id, result);
+            }
+            Ok(Async::Ready(None)) => {
+                break
+            }
+            Ok(Async::NotReady) => {
+                sleep_now()
+            }
+            Err(error) => {
+                println!("error in request {:?}", error);
+                match error {
+                    LookupEventsError::Unknown(http_error) => {
+                        let s = str::from_utf8(&http_error.body).unwrap();
+                        println!("status: {:?}, {:?}", http_error.status, s);
+                    }
+                    _ => {
+                        println!("error {:?}", error);
+                    }
+                }
+                break
+            }
+        }
+    }
+}
+*/
 fn get_vpcs(provider: ProfileProvider, region: Region) -> RusotoFuture<DescribeVpcsResult, DescribeVpcsError>{
     let client = Ec2Client::new_with(HttpClient::new().unwrap(), provider, region.clone());
     let request = DescribeVpcsRequest {
@@ -71,38 +110,11 @@ fn get_vpcs(provider: ProfileProvider, region: Region) -> RusotoFuture<DescribeV
     };
     client.describe_vpcs(request)
 }
-
-fn get_events(client: &CloudTrail, vpc_id: &str, token: Option<String>)
-              -> RusotoFuture<LookupEventsResponse, LookupEventsError> {
-//    pub struct LookupEventsRequest {
-//        pub end_time: Option<f64>,
-//        pub lookup_attributes: Option<Vec<LookupAttribute>>,
-//        pub max_results: Option<i64>,
-//        pub next_token: Option<String>,
-//        pub start_time: Option<f64>,
-//    }
-    let attrs = vec![
-        LookupAttribute{
-            attribute_key: "ResourceName".to_string(),
-            attribute_value: vpc_id.to_string(),
-        }
-    ];
-    let request = LookupEventsRequest {
-        end_time: None,
-        lookup_attributes: Some(attrs),
-        max_results: None,
-        next_token: token,
-        start_time: None,
-    };
-
-    client.lookup_events(request)
-}
-
-struct VpcInfo {
-    vpc: Vpc,
-    created: Option<Event>,
-    deleted: Option<Event>,
-}
+//struct VpcInfo {
+//    vpc: Vpc,
+//    created: Option<Event>,
+//    deleted: Option<Event>,
+//}
 
 fn handle_events_future(vpc_id: &str, result: LookupEventsResponse) {
     println!("vpc id {:?}", vpc_id);
@@ -114,12 +126,12 @@ fn handle_events_future(vpc_id: &str, result: LookupEventsResponse) {
     }
 
 //    let mut names: HashSet<String> = HashSet::new();
-    result.events.unwrap().into_iter()
+    let _: Vec<Event> = result.events.unwrap().into_iter()
         .filter(|event| event.event_name.as_ref().unwrap().to_lowercase().contains("vpc"))
-        .map(print_event );
+        .map(print_event ).collect();
 }
 
-
+/*
 fn get_instances(vpc: &Vpc, provider: ProfileProvider, region: Region, token: Option<String>) -> RusotoFuture<DescribeInstancesResult, DescribeInstancesError>{
     let client = Ec2Client::new_with(HttpClient::new().unwrap(), provider, region.clone());
     let vpc_id =  vpc.vpc_id.clone().unwrap();
@@ -141,7 +153,7 @@ fn get_instances(vpc: &Vpc, provider: ProfileProvider, region: Region, token: Op
 
 }
 
-/*
+
 fn _print_vpcs(provider: ProfileProvider, region: Region) {
 //    let region_name = region.name();
     match get_vpcs(provider.clone(), region.clone()).sync() {
@@ -175,49 +187,56 @@ fn _print_vpcs(provider: ProfileProvider, region: Region) {
 }
 */
 
+fn sleep_now() {
+    println!("sleeping for a second");
+    for _ in 1..10000 {
+
+    }
+
+
+//    thread::sleep(time::Duration::from_secs(1));
+    println!("im up");
+}
+
+
 fn main() {
     let _ = env_logger::try_init();
-    let provider = ProfileProvider::with_configuration(aws_creds_location().unwrap(),"pcf-qa");
+    let provider = ProfileProvider::with_configuration(aws_creds_location().unwrap(), "pcf-qa");
     for region in regions() {
+//        let vpcs = get_vpcs(provider.clone(), region.clone()).into_stream();
         let vpc_id = "vpc-0cf966f1ef951882d";
         if region != &Region::UsEast1 {
             continue
         }
-        let mut token = None;
         let client = CloudTrailClient::new_with(HttpClient::new().unwrap(), provider.clone(), region.clone());
-        loop {
-            let f_events = get_events(&client, vpc_id, token.clone()).sync();
-            match f_events {
-                Ok(result) => {
-        //          LookupEventsResponse, LookupEventsError
-                    let next_token = result.next_token.clone();
-                    handle_events_future(vpc_id, result);
-                    if next_token.is_none() {
-                        break
-                    } else {
-                        token = next_token;
-                    }
-                },
-                Err(error) => {
-                    println!("error in region {} {:?}", region.name(), error);
-                    match error {
-                        LookupEventsError::Unknown(http_error) => {
-                            let s = str::from_utf8(&http_error.body).unwrap();
-                            println!("status: {:?}, {:?}", http_error.status, s);
-                        }
-                        _ => {
-                            println!("error {:?}", error);
-                        }
-                    }
-                }
+        let attrs = vec![
+            LookupAttribute {
+                attribute_key: "ResourceName".to_string(),
+                attribute_value: vpc_id.to_string(),
             }
-        }
+        ];
+        let request = LookupEventsRequest {
+            end_time: None,
+            lookup_attributes: Some(attrs),
+            max_results: None,
+            next_token: None,
+            start_time: None,
+        };
+//        let getter = GetEvents::new(client, request);
+//        get_all_events(vpc_id, getter)
+//        let getev = <events_stream::GetEvents as Trait>::new(client, request);
+        let getev = GetEvents::new(client, request);
 
-    }
+        tokio::run(getev.timeout(Duration::from_secs(30))
+            .map_err(|e| {
+                println!("operation timed out");
+            }));
+        println!("all done");
+    };
 
     /*
     for region in regions() {
-//        let region_name = region.clone().name();
+    //        let region_name = region.clone().name();
         let f_vpcs = get_vpcs(provider.clone(), region.clone()).sync();
         match f_vpcs {
             Ok(result) => {
