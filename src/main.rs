@@ -178,10 +178,6 @@ fn get_ec2_client(region: Region) -> Ec2Client {
 }
 
 
-fn print_vpcs(f: impl Future) {
-
-}
-
 fn vpc_events_request(vpc_id: String) -> LookupEventsRequest {
     let attrs = vec![
         LookupAttribute{
@@ -199,20 +195,27 @@ fn vpc_events_request(vpc_id: String) -> LookupEventsRequest {
     request
 }
 
+fn handle_event(event: Event, vpc_id: &String, region: &Region) {
+    if let Some(event_name) = event.event_name.clone() {
+        if event_name == "CreateVpc".to_string() {
+            let event_time = NaiveDateTime::from_timestamp(event.event_time.unwrap().round() as i64, 0);
+            let username = event.username.unwrap();
+            println!("region {:?} vpc_id {:?} created on {:?} by user {:?}", region, vpc_id, event_time, username);
+        }
+    }
+}
+//{
+// cloud_trail_event: Some("{\"eventVersion\":\"1.05\",\"userIdentity\":{\"type\":\"IAMUser\",\"principalId\":\"AIDAJESDFTRGFJKAP6JUS\",\"arn\":\"arn:aws:iam::655098200890:user/opereto_user\",\"accountId\":\"655098200890\",\"accessKeyId\":\"AKIAIDOIFIAIE7QKLX6Q\",\"userName\":\"opereto_user\"},\"eventTime\":\"2019-03-18T17:43:54Z\",\"eventSource\":\"ec2.amazonaws.com\",\"eventName\":\"CreateVpc\",\"awsRegion\":\"eu-west-1\",\"sourceIPAddress\":\"35.184.159.11\",\"userAgent\":\"aws-sdk-go/1.17.11 (go1.11.5; linux; amd64) APN/1.0 HashiCorp/1.0 Terraform/0.11.12\",\"requestParameters\":{\"cidrBlock\":\"10.0.0.0/16\",\"instanceTenancy\":\"default\",\"amazonProvidedIpv6CidrBlock\":false},\"responseElements\":{\"requestId\":\"fa2df31a-23f6-4b89-a19c-92e260a1f7a6\",\"vpc\":{\"vpcId\":\"vpc-0fbbdd05029d56db1\",\"state\":\"pending\",\"ownerId\":\"655098200890\",\"cidrBlock\":\"10.0.0.0/16\",\"cidrBlockAssociationSet\":{\"items\":[{\"cidrBlock\":\"10.0.0.0/16\",\"associationId\":\"vpc-cidr-assoc-0fdefd0aa77dd7e8f\",\"cidrBlockState\":{\"state\":\"associated\"}}]},\"ipv6CidrBlockAssociationSet\":{},\"dhcpOptionsId\":\"dopt-631a8206\",\"instanceTenancy\":\"default\",\"tagSet\":{},\"isDefault\":false}},\"requestID\":\"fa2df31a-23f6-4b89-a19c-92e260a1f7a6\",\"eventID\":\"049852ab-068f-4fdc-81c4-24f699e31a57\",\"eventType\":\"AwsApiCall\",\"recipientAccountId\":\"655098200890\"}"), event_id: Some("049852ab-068f-4fdc-81c4-24f699e31a57"), event_name: Some("CreateVpc"), event_source: Some("ec2.amazonaws.com"), event_time: Some(1552931034.0), resources: Some([Resource { resource_name: Some("vpc-0fbbdd05029d56db1"), resource_type: Some("AWS::EC2::VPC") }]),
+// username: Some("opereto_user") }
 fn describe_events(region: Region, vpc_id: String) -> impl Future<Item=(), Error=LookupEventsError> {
     let client = get_events_client(region.clone());
-    let request = vpc_events_request(vpc_id);
+    let request = vpc_events_request(vpc_id.clone());
     let events_future = client.lookup_events(request.clone())
-        .map( |v| {
+        .map( move |v| {
             let region = region;
             let events = v.events.unwrap();
             for event in events {
-                if let Some(event_name) = event.event_name.clone() {
-                    if event_name == "CreateVpc".to_string() {
-                        println!("region {:?} event {:?}", &region, event);
-                    }
-                }
-
+                handle_event(event, &vpc_id, &region);
             }
         });
     events_future
@@ -253,6 +256,39 @@ fn describe_vpcs_future(region: Region) -> impl Future<Item=DescribeVpcsResult, 
     return f
 }
 
+fn spawn_describe_events(region: Region , vpc_id: String) {
+    let r = region.clone();
+    let v = vpc_id.clone();
+    let handle_error = |e: LookupEventsError| {
+        if let LookupEventsError::Unknown(http_error) = e {
+            let body = str::from_utf8(&http_error.body).unwrap();
+            if http_error.status.as_u16() == 400 && body.contains("ThrottlingException") {
+                spawn_describe_events(r, v);
+            } else {
+                println!("Other LookupEventsError::Unknown error {:?}", body);
+            }
+        } else {
+            println!("Other LookupEventsError error {:?}", e);
+        };
+    };
+
+    let f =
+        describe_events(region.clone(), vpc_id).map_err(handle_error);
+    tokio::spawn(f);
+}
+//fn on_lookup_error(e: LookupEventsError) {
+//    if let LookupEventsError::Unknown(http_error) = e {
+//        let body = str::from_utf8(&http_error.body).unwrap();
+//        if http_error.status.as_u16() == 400 && body.contains("ThrottlingException") {
+//            tokio::spawn()
+//        }
+//
+//        println!("LookupEventsError : {:?}, {:?}", http_error.status, s);
+//    } else {
+//        println!("Other inner error {:?}", e);
+//    }
+//    );
+//}
 fn all_regions() -> Result<(), ()>{
     for region in regions() {
         let f =
@@ -263,16 +299,7 @@ fn all_regions() -> Result<(), ()>{
                         println!("found {} vpcs in region {:?}", vpcs.len(), region.clone());
                         for vpc in vpcs {
                             if vpc.vpc_id.is_some() {
-                                let f = describe_events(region.clone(), vpc.vpc_id.unwrap())
-                                    .map_err( |e|
-                                        if let LookupEventsError::Unknown(http_error) = e {
-                                            let s = str::from_utf8(&http_error.body).unwrap();
-                                            println!("LookupEventsError : {:?}, {:?}", http_error.status, s);
-                                        } else {
-                                            println!("Other inner error {:?}", e);
-                                        }
-                                    );
-                                tokio::spawn(f);
+                                spawn_describe_events(region.clone(), vpc.vpc_id.unwrap());
                             }
                         }
                         Ok(())
