@@ -4,7 +4,6 @@ extern crate rusoto_core;
 extern crate rusoto_ec2;
 extern crate rusoto_cloudtrail;
 
-#[macro_use]
 extern crate futures;
 extern crate tokio;
 extern crate chrono;
@@ -14,28 +13,23 @@ extern crate chrono;
 use std::env::var as env_var;
 use tokio::prelude::*;
 use chrono::prelude::*;
-use std::time::{Duration,};
 use std::{str};
-//use std::error::Error;
-//use std::collections::HashSet;
+
+use std::collections::HashMap;
 use std::path::PathBuf;
 use futures::lazy;
 
 use dirs::home_dir;
-use rusoto_core::{Region, HttpClient, RusotoFuture};
+use rusoto_core::{Region, HttpClient};
 use rusoto_core::credential::ProfileProvider;
 use rusoto_ec2::{
     Ec2Client, Ec2,
-//    Filter,
-    Vpc,
     DescribeVpcsRequest, DescribeVpcsResult, DescribeVpcsError,
-//    DescribeInstancesRequest, DescribeInstancesResult, DescribeInstancesError,
 };
 use rusoto_cloudtrail::{
     CloudTrailClient,
     CloudTrail,
     LookupEventsRequest,
-    LookupEventsResponse,
     LookupEventsError,
     LookupAttribute,
     Event
@@ -92,7 +86,12 @@ fn aws_creds_location() -> Result<PathBuf, &'static str> {
 
 
 fn profile_provider() -> ProfileProvider {
-    ProfileProvider::with_configuration(aws_creds_location().unwrap(), "pcf-qa")
+    let name = "AWS_PROFILE";
+    let profile_name = match env_var(name) {
+        Ok(value)  => value,
+        _ => "default".to_string()
+    };
+    ProfileProvider::with_configuration(aws_creds_location().unwrap(), profile_name)
 }
 
 
@@ -132,47 +131,35 @@ fn vpc_events_request(vpc_id: String) -> LookupEventsRequest {
     request
 }
 
-fn handle_event(event: Event, vpc_id: &String, region: &Region) {
-    if let Some(event_name) = event.event_name.clone() {
-        if event_name == "CreateVpc".to_string() {
-            let event_time = NaiveDateTime::from_timestamp(event.event_time.unwrap().round() as i64, 0);
-            let username = event.username.unwrap();
+
+fn handle_events(events: Vec<Event>, vpc_id: String, region: Region) {
+//    "CreateVpc"
+    let name_to_event: HashMap<String, Event> = events.into_iter()
+        .map(|event| (event.event_name.clone().unwrap(), event)).collect();
+    match name_to_event.get("CreateVpc") {
+        Some(event) => {
+            let event_time = NaiveDateTime::from_timestamp(event.event_time.as_ref().unwrap().round() as i64, 0);
+            let username = event.username.as_ref().unwrap();
             println!("region {:?} vpc_id {:?} created on {:?} by user {:?}", region, vpc_id, event_time, username);
+        },
+        None => {
+            println!("region {:?} vpc_id {:?} Unknown creation time", region, vpc_id);
         }
-    }
+    };
 }
-//{
-// cloud_trail_event: Some("{\"eventVersion\":\"1.05\",\"userIdentity\":{\"type\":\"IAMUser\",\"principalId\":\"AIDAJESDFTRGFJKAP6JUS\",\"arn\":\"arn:aws:iam::655098200890:user/opereto_user\",\"accountId\":\"655098200890\",\"accessKeyId\":\"AKIAIDOIFIAIE7QKLX6Q\",\"userName\":\"opereto_user\"},\"eventTime\":\"2019-03-18T17:43:54Z\",\"eventSource\":\"ec2.amazonaws.com\",\"eventName\":\"CreateVpc\",\"awsRegion\":\"eu-west-1\",\"sourceIPAddress\":\"35.184.159.11\",\"userAgent\":\"aws-sdk-go/1.17.11 (go1.11.5; linux; amd64) APN/1.0 HashiCorp/1.0 Terraform/0.11.12\",\"requestParameters\":{\"cidrBlock\":\"10.0.0.0/16\",\"instanceTenancy\":\"default\",\"amazonProvidedIpv6CidrBlock\":false},\"responseElements\":{\"requestId\":\"fa2df31a-23f6-4b89-a19c-92e260a1f7a6\",\"vpc\":{\"vpcId\":\"vpc-0fbbdd05029d56db1\",\"state\":\"pending\",\"ownerId\":\"655098200890\",\"cidrBlock\":\"10.0.0.0/16\",\"cidrBlockAssociationSet\":{\"items\":[{\"cidrBlock\":\"10.0.0.0/16\",\"associationId\":\"vpc-cidr-assoc-0fdefd0aa77dd7e8f\",\"cidrBlockState\":{\"state\":\"associated\"}}]},\"ipv6CidrBlockAssociationSet\":{},\"dhcpOptionsId\":\"dopt-631a8206\",\"instanceTenancy\":\"default\",\"tagSet\":{},\"isDefault\":false}},\"requestID\":\"fa2df31a-23f6-4b89-a19c-92e260a1f7a6\",\"eventID\":\"049852ab-068f-4fdc-81c4-24f699e31a57\",\"eventType\":\"AwsApiCall\",\"recipientAccountId\":\"655098200890\"}"), event_id: Some("049852ab-068f-4fdc-81c4-24f699e31a57"), event_name: Some("CreateVpc"), event_source: Some("ec2.amazonaws.com"), event_time: Some(1552931034.0), resources: Some([Resource { resource_name: Some("vpc-0fbbdd05029d56db1"), resource_type: Some("AWS::EC2::VPC") }]),
-// username: Some("opereto_user") }
+
+
 fn describe_events(region: Region, vpc_id: String) -> impl Future<Item=(), Error=LookupEventsError> {
     let client = get_events_client(region.clone());
     let request = vpc_events_request(vpc_id.clone());
     let events_future = client.lookup_events(request.clone())
         .map( move |v| {
-            let region = region;
             let events = v.events.unwrap();
-            for event in events {
-                handle_event(event, &vpc_id, &region);
-            }
+            handle_events(events, vpc_id, region);
         });
     events_future
+}
 
-}
-/*
-fn all_events_future(region: Region) -> impl FnOnce(DescribeVpcsResult) -> Result<(),()>{
-    let _all_events = move |v : DescribeVpcsResult| {
-        println!("found {} vpcs in region {:?}", &v.vpcs.unwrap().len(), region.clone());
-        for vpc in v.vpcs.unwrap() {
-            if vpc.vpc_id.is_some() {
-                let f = describe_events(region.clone(), vpc.vpc_id.unwrap());
-                tokio::spawn(f);
-            }
-        }
-        Ok(())
-    };
-    _all_events
-}
-*/
 
 fn describe_vpcs_future(region: Region) -> impl Future<Item=DescribeVpcsResult, Error=()>{
     debug!("calling describe vpcs in region {:?}", &region);
@@ -202,10 +189,10 @@ fn spawn_describe_events(region: Region , vpc_id: String) {
             if http_error.status.as_u16() == 400 && body.contains("ThrottlingException") {
                 spawn_describe_events(r, v);
             } else {
-                println!("Other LookupEventsError::Unknown error {:?}", body);
+                println!("LookupEventsError::Unknown {:?}", body);
             }
         } else {
-            println!("Other LookupEventsError error {:?}", e);
+            println!("LookupEventsError {:?}", e);
         };
     };
 
@@ -213,19 +200,8 @@ fn spawn_describe_events(region: Region , vpc_id: String) {
         describe_events(region.clone(), vpc_id).map_err(handle_error);
     tokio::spawn(f);
 }
-//fn on_lookup_error(e: LookupEventsError) {
-//    if let LookupEventsError::Unknown(http_error) = e {
-//        let body = str::from_utf8(&http_error.body).unwrap();
-//        if http_error.status.as_u16() == 400 && body.contains("ThrottlingException") {
-//            tokio::spawn()
-//        }
-//
-//        println!("LookupEventsError : {:?}, {:?}", http_error.status, s);
-//    } else {
-//        println!("Other inner error {:?}", e);
-//    }
-//    );
-//}
+
+
 fn all_regions() -> Result<(), ()>{
     for region in regions() {
         let f =
@@ -233,7 +209,7 @@ fn all_regions() -> Result<(), ()>{
                 .and_then(
                     move |v | {
                         let vpcs = v.vpcs.unwrap();
-                        println!("found {} vpcs in region {:?}", vpcs.len(), region.clone());
+                        debug!("found {} vpcs in region {:?}", vpcs.len(), region.clone());
                         for vpc in vpcs {
                             if vpc.vpc_id.is_some() {
                                 spawn_describe_events(region.clone(), vpc.vpc_id.unwrap());
@@ -242,77 +218,14 @@ fn all_regions() -> Result<(), ()>{
                         Ok(())
                     }
                 );
-//            .map_err( |e|  println!("error 123 {:?}", e));
         tokio::spawn(f);
     }
     Ok(())
 }
+
 fn main() {
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("warn"));
     info!("starting {:?}", Local::now().time().to_string());
     tokio::run(lazy(all_regions));
     info!("done {:?}", Local::now().time().to_string());
-
-
-    /*
-    for region in regions() {
-    //        let region_name = region.clone().name();
-        let f_vpcs = get_vpcs(provider.clone(), region.clone()).sync();
-        match f_vpcs {
-            Ok(result) => {
-                let vpcs = result.vpcs.unwrap();
-                println!("found  {:?} vpcs ", vpcs.len());
-                let region_name = region.name();
-                for vpc in &vpcs {
-                    let vpc_id = &vpc.vpc_id;
-                    println!("region {}, vpc_id {:?}", region_name, vpc_id);
-                    loop {
-                        let f_instances = get_instances(vpc, provider.clone(), region.clone(), None).sync();
-                        //                println!("tags {:?}", vpc.tags);
-                        match f_instances {
-                            Ok(instances_result) => {
-                                let reservations = instances_result.reservations.unwrap();
-                                for reservation in reservations {
-                                    for instance in reservation.instances.unwrap() {
-                                        println!("vcp id {:?} instance id {:?}", vpc_id, instance.instance_id.unwrap());
-                                    }
-                                }
-                                if instances_result.next_token.is_none() {
-                                    break
-                                }
-                            },
-                            Err(error) => {
-                                println!("failed to get instances from vpc {:?} region {}", vpc_id, region_name);
-                                match error {
-                                    DescribeInstancesError::Unknown(http_error) => {
-                                        let s = str::from_utf8(&http_error.body).unwrap();
-                                        println!("status: {:?}, {:?}", http_error.status, s);
-                                    }
-                                    _ => {
-                                        println!("error {:?}", error);
-                                    }
-                                }
-                                break
-                            }
-                        }
-                    }
-
-                }
-            },
-            Err(error) => {
-                println!("error in region {} {:?}", region.name(), error);
-                match error {
-                    DescribeVpcsError::Unknown(http_error) => {
-                        let s = str::from_utf8(&http_error.body).unwrap();
-                        println!("status: {:?}, {:?}", http_error.status, s);
-                    }
-                    _ => {
-                        println!("error {:?}", error);
-                    }
-                }
-
-            }
-        }
-    }
-    */
 }
