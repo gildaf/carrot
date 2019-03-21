@@ -6,33 +6,40 @@ extern crate rusoto_cloudtrail;
 #[macro_use]
 extern crate futures;
 extern crate tokio;
+extern crate chrono;
 //extern crate rusoto_sts;
 
 
 //use std::default::Default;
 use tokio::prelude::*;
-use std::time::Duration;
+use chrono::prelude::*;
+use std::time::{Duration,};
 use std::{str};
+//use std::error::Error;
 //use std::collections::HashSet;
 use std::path::PathBuf;
+use futures::lazy;
 
 use dirs::home_dir;
 use rusoto_core::{Region, HttpClient, RusotoFuture};
 use rusoto_core::credential::ProfileProvider;
 use rusoto_ec2::{
     Ec2Client, Ec2,
-//    Filter, Vpc
+//    Filter,
+    Vpc,
     DescribeVpcsRequest, DescribeVpcsResult, DescribeVpcsError,
 //    DescribeInstancesRequest, DescribeInstancesResult, DescribeInstancesError,
 };
 use rusoto_cloudtrail::{
     CloudTrailClient,
-    LookupEventsRequest, LookupEventsResponse,
-//    LookupEventsError,
-    LookupAttribute, Event
+    CloudTrail,
+    LookupEventsRequest,
+    LookupEventsResponse,
+    LookupEventsError,
+    LookupAttribute,
+    Event
 };
-mod events_stream;
-use events_stream::{GetEvents};
+
 //use rusoto_sts::{StsClient, StsAssumeRoleSessionCredentialsProvider};
 
 
@@ -100,6 +107,8 @@ fn get_all_events(vpc_id: &str, mut getter: GetEvents) {
     }
 }
 */
+
+
 fn get_vpcs(provider: ProfileProvider, region: Region) -> RusotoFuture<DescribeVpcsResult, DescribeVpcsError>{
     let client = Ec2Client::new_with(HttpClient::new().unwrap(), provider, region.clone());
     let request = DescribeVpcsRequest {
@@ -109,26 +118,6 @@ fn get_vpcs(provider: ProfileProvider, region: Region) -> RusotoFuture<DescribeV
 //        vpc_ids: Some(vec!["vpc-0d71cf41493261272".to_string()]),
     };
     client.describe_vpcs(request)
-}
-//struct VpcInfo {
-//    vpc: Vpc,
-//    created: Option<Event>,
-//    deleted: Option<Event>,
-//}
-
-fn handle_events_future(vpc_id: &str, result: LookupEventsResponse) {
-    println!("vpc id {:?}", vpc_id);
-    fn print_event(event: Event) -> Event{
-        println!("\tevent name{:?}", event.event_name.as_ref().unwrap());
-        println!("the event {:?}", event.cloud_trail_event.as_ref().unwrap());
-        println!("\tuser name {:?}", event.username.as_ref().unwrap());
-        event
-    }
-
-//    let mut names: HashSet<String> = HashSet::new();
-    let _: Vec<Event> = result.events.unwrap().into_iter()
-        .filter(|event| event.event_name.as_ref().unwrap().to_lowercase().contains("vpc"))
-        .map(print_event ).collect();
 }
 
 /*
@@ -150,40 +139,6 @@ fn get_instances(vpc: &Vpc, provider: ProfileProvider, region: Region, token: Op
     };
 
     let f = client.describe_instances(request);
-
-}
-
-
-fn _print_vpcs(provider: ProfileProvider, region: Region) {
-//    let region_name = region.name();
-    match get_vpcs(provider.clone(), region.clone()).sync() {
-        Ok(result) => {
-            let vpcs = result.vpcs.unwrap();
-//            let  a = vec![1,2];
-//            a.len()
-            println!("found  {:?} vpcs ", vpcs.len());
-            let region_name = region.name();
-            for vpc in &vpcs {
-                println!("region {}, vpc_id {:?}", region_name, vpc.vpc_id);
-                get_instances(vpc, provider.clone(), region.clone()).sync();
-//                println!("tags {:?}", vpc.tags);
-            }
-
-        }
-        Err(error) => {
-//            let a: () = error;
-            println!("error in region {} {:?}", region.name(), error);
-            match error {
-                DescribeVpcsError::Unknown(http_error) => {
-                    let s = str::from_utf8(&http_error.body).unwrap();
-                    println!("status: {:?}, {:?}", http_error.status, s);
-                }
-                _ => {
-                    println!("error {:?}", error);
-                }
-            }
-        }
-    }
 }
 */
 
@@ -199,40 +154,142 @@ fn sleep_now() {
 }
 
 
+fn profile_provider() -> ProfileProvider {
+    ProfileProvider::with_configuration(aws_creds_location().unwrap(), "pcf-qa")
+}
+
+
+fn get_events_client(region: Region) -> CloudTrailClient {
+    let client = CloudTrailClient::new_with(
+        HttpClient::new().unwrap(),
+        profile_provider(),
+        region);
+    client
+}
+
+
+fn get_ec2_client(region: Region) -> Ec2Client {
+    let client = Ec2Client::new_with(
+        HttpClient::new().unwrap(),
+        profile_provider(),
+        region
+    );
+    client
+}
+
+
+fn print_vpcs(f: impl Future) {
+
+}
+
+fn vpc_events_request(vpc_id: String) -> LookupEventsRequest {
+    let attrs = vec![
+        LookupAttribute{
+            attribute_key: "ResourceName".to_string(),
+            attribute_value: vpc_id,
+        }
+    ];
+    let request = LookupEventsRequest {
+        end_time: None,
+        lookup_attributes: Some(attrs),
+        max_results: None,
+        next_token: None,
+        start_time: None,
+    };
+    request
+}
+
+fn describe_events(region: Region, vpc_id: String) -> impl Future<Item=(), Error=LookupEventsError> {
+    let client = get_events_client(region.clone());
+    let request = vpc_events_request(vpc_id);
+    let events_future = client.lookup_events(request.clone())
+        .map( |v| {
+            let region = region;
+            let events = v.events.unwrap();
+            for event in events {
+                if let Some(event_name) = event.event_name.clone() {
+                    if event_name == "CreateVpc".to_string() {
+                        println!("region {:?} event {:?}", &region, event);
+                    }
+                }
+
+            }
+        });
+    events_future
+
+}
+/*
+fn all_events_future(region: Region) -> impl FnOnce(DescribeVpcsResult) -> Result<(),()>{
+    let _all_events = move |v : DescribeVpcsResult| {
+        println!("found {} vpcs in region {:?}", &v.vpcs.unwrap().len(), region.clone());
+        for vpc in v.vpcs.unwrap() {
+            if vpc.vpc_id.is_some() {
+                let f = describe_events(region.clone(), vpc.vpc_id.unwrap());
+                tokio::spawn(f);
+            }
+        }
+        Ok(())
+    };
+    _all_events
+}
+*/
+
+fn describe_vpcs_future(region: Region) -> impl Future<Item=DescribeVpcsResult, Error=()>{
+    println!("region {:?}", &region);
+    let request = DescribeVpcsRequest {
+        dry_run: Some(false),
+        filters: None,
+        vpc_ids: None,
+    };
+    let client = get_ec2_client(region.clone());
+    let f = client.describe_vpcs(request)
+        .map_err( |e|
+            if let DescribeVpcsError::Unknown(http_error) = e {
+                let s = str::from_utf8(&http_error.body).unwrap();
+                println!("DescribeVpcsError : {:?}, {:?}", http_error.status, s);
+            } else {
+                println!("Other inner error {:?}", e);
+            });
+    return f
+}
+
+fn all_regions() -> Result<(), ()>{
+    for region in regions() {
+        let f =
+            describe_vpcs_future(region.clone())
+                .and_then(
+                    move |v | {
+                        let vpcs = v.vpcs.unwrap();
+                        println!("found {} vpcs in region {:?}", vpcs.len(), region.clone());
+                        for vpc in vpcs {
+                            if vpc.vpc_id.is_some() {
+                                let f = describe_events(region.clone(), vpc.vpc_id.unwrap())
+                                    .map_err( |e|
+                                        if let LookupEventsError::Unknown(http_error) = e {
+                                            let s = str::from_utf8(&http_error.body).unwrap();
+                                            println!("LookupEventsError : {:?}, {:?}", http_error.status, s);
+                                        } else {
+                                            println!("Other inner error {:?}", e);
+                                        }
+                                    );
+                                tokio::spawn(f);
+                            }
+                        }
+                        Ok(())
+                    }
+                );
+//            .map_err( |e|  println!("error 123 {:?}", e));
+        tokio::spawn(f);
+    }
+    Ok(())
+}
 fn main() {
     let _ = env_logger::try_init();
-    let provider = ProfileProvider::with_configuration(aws_creds_location().unwrap(), "pcf-qa");
-    for region in regions() {
-//        let vpcs = get_vpcs(provider.clone(), region.clone()).into_stream();
-        let vpc_id = "vpc-0cf966f1ef951882d";
-        if region != &Region::UsEast1 {
-            continue
-        }
-        let client = CloudTrailClient::new_with(HttpClient::new().unwrap(), provider.clone(), region.clone());
-        let attrs = vec![
-            LookupAttribute {
-                attribute_key: "ResourceName".to_string(),
-                attribute_value: vpc_id.to_string(),
-            }
-        ];
-        let request = LookupEventsRequest {
-            end_time: None,
-            lookup_attributes: Some(attrs),
-            max_results: None,
-            next_token: None,
-            start_time: None,
-        };
-//        let getter = GetEvents::new(client, request);
-//        get_all_events(vpc_id, getter)
-//        let getev = <events_stream::GetEvents as Trait>::new(client, request);
-        let getev = GetEvents::new(client, request);
 
-        tokio::run(getev.timeout(Duration::from_secs(30))
-            .map_err(|e| {
-                println!("operation timed out");
-            }));
-        println!("all done");
-    };
+    println!("starting {:?}", Local::now().time().to_string());
+    tokio::run(lazy(all_regions));
+    println!("done {:?}", Local::now().time().to_string());
+
 
     /*
     for region in regions() {
