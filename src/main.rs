@@ -1,3 +1,4 @@
+#[macro_use] extern crate log;
 extern crate env_logger;
 extern crate rusoto_core;
 extern crate rusoto_ec2;
@@ -10,7 +11,7 @@ extern crate chrono;
 //extern crate rusoto_sts;
 
 
-//use std::default::Default;
+use std::env::var as env_var;
 use tokio::prelude::*;
 use chrono::prelude::*;
 use std::time::{Duration,};
@@ -64,7 +65,7 @@ fn regions() ->  &'static [Region]{
 }
 
 
-fn aws_creds_location() -> Result<PathBuf, &'static str> {
+fn default_aws_creds_location() -> Result<PathBuf, &'static str> {
     match home_dir() {
         Some(mut home_path) => {
             home_path.push(".aws");
@@ -77,80 +78,16 @@ fn aws_creds_location() -> Result<PathBuf, &'static str> {
     }
 }
 
-/*
-fn get_all_events(vpc_id: &str, mut getter: GetEvents) {
-    loop {
-        match getter.poll() {
-            Ok(Async::Ready(Some(result))) => {
-                handle_events_future(vpc_id, result);
-            }
-            Ok(Async::Ready(None)) => {
-                break
-            }
-            Ok(Async::NotReady) => {
-                sleep_now()
-            }
-            Err(error) => {
-                println!("error in request {:?}", error);
-                match error {
-                    LookupEventsError::Unknown(http_error) => {
-                        let s = str::from_utf8(&http_error.body).unwrap();
-                        println!("status: {:?}, {:?}", http_error.status, s);
-                    }
-                    _ => {
-                        println!("error {:?}", error);
-                    }
-                }
-                break
-            }
+
+fn aws_creds_location() -> Result<PathBuf, &'static str> {
+    let name = "AWS_CREDENTIALS";
+    match env_var(name) {
+        Ok(ref value) if !value.is_empty() => {
+            Ok(PathBuf::from(value))
         }
-    }
-}
-*/
-
-
-fn get_vpcs(provider: ProfileProvider, region: Region) -> RusotoFuture<DescribeVpcsResult, DescribeVpcsError>{
-    let client = Ec2Client::new_with(HttpClient::new().unwrap(), provider, region.clone());
-    let request = DescribeVpcsRequest {
-        dry_run: Some(false),
-        filters: None,
-        vpc_ids: None,
-//        vpc_ids: Some(vec!["vpc-0d71cf41493261272".to_string()]),
-    };
-    client.describe_vpcs(request)
-}
-
-/*
-fn get_instances(vpc: &Vpc, provider: ProfileProvider, region: Region, token: Option<String>) -> RusotoFuture<DescribeInstancesResult, DescribeInstancesError>{
-    let client = Ec2Client::new_with(HttpClient::new().unwrap(), provider, region.clone());
-    let vpc_id =  vpc.vpc_id.clone().unwrap();
-    let vpc_filter = Filter {
-        name: Some("vpc-id".to_string()),
-        values: Some(vec![vpc_id]),
-    };
-
-    let request = DescribeInstancesRequest {
-        /// <p>Checks whether you have the required permissions for the action, without actually making the request, and provides an error response. If you have the required permissions, the error response is <code>DryRunOperation</code>. Otherwise, it is <code>UnauthorizedOperation</code>.</p>
-        dry_run: Some(false),
-        filters: Some(vec![vpc_filter]),
-        instance_ids: None,
-        max_results: None,
-        next_token: token,
-    };
-
-    let f = client.describe_instances(request);
-}
-*/
-
-fn sleep_now() {
-    println!("sleeping for a second");
-    for _ in 1..10000 {
-
+        _ => default_aws_creds_location()
     }
 
-
-//    thread::sleep(time::Duration::from_secs(1));
-    println!("im up");
 }
 
 
@@ -238,7 +175,7 @@ fn all_events_future(region: Region) -> impl FnOnce(DescribeVpcsResult) -> Resul
 */
 
 fn describe_vpcs_future(region: Region) -> impl Future<Item=DescribeVpcsResult, Error=()>{
-    println!("region {:?}", &region);
+    debug!("calling describe vpcs in region {:?}", &region);
     let request = DescribeVpcsRequest {
         dry_run: Some(false),
         filters: None,
@@ -311,11 +248,10 @@ fn all_regions() -> Result<(), ()>{
     Ok(())
 }
 fn main() {
-    let _ = env_logger::try_init();
-
-    println!("starting {:?}", Local::now().time().to_string());
+    env_logger::init_from_env(env_logger::Env::default().default_filter_or("warn"));
+    info!("starting {:?}", Local::now().time().to_string());
     tokio::run(lazy(all_regions));
-    println!("done {:?}", Local::now().time().to_string());
+    info!("done {:?}", Local::now().time().to_string());
 
 
     /*
