@@ -13,7 +13,7 @@ extern crate chrono;
 use std::env::var as env_var;
 use tokio::prelude::*;
 use chrono::prelude::*;
-use std::{str};
+use std::{str, fmt};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -34,7 +34,8 @@ use rusoto_cloudtrail::{
     LookupAttribute,
     Event
 };
-
+mod vpc_stream;
+use vpc_stream::VpcStream;
 //use rusoto_sts::{StsClient, StsAssumeRoleSessionCredentialsProvider};
 
 
@@ -201,6 +202,16 @@ fn spawn_describe_events(region: Region , vpc_id: String) {
     tokio::spawn(f);
 }
 
+struct VpcInfo {
+    vpc_id: String,
+    region: Region,
+    creation_time: Option<f64>,
+    created_by: Option<String>,
+}
+
+struct VpcInfoStream {
+
+}
 
 fn all_regions() -> Result<(), ()>{
     for region in regions() {
@@ -223,9 +234,28 @@ fn all_regions() -> Result<(), ()>{
     Ok(())
 }
 
-fn main() {
+fn _main() {
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("warn"));
     info!("starting {:?}", Local::now().time().to_string());
     tokio::run(lazy(all_regions));
+    info!("done {:?}", Local::now().time().to_string());
+}
+
+pub fn just_print<T, E>(f: impl Future<Item=T, Error=E>) -> impl Future<Item=(), Error=()>
+    where T: fmt::Debug, E: fmt::Debug {
+    f.map(|v| {println!("got a result {:?}", v);} )
+        .map_err(|_e| {println!("got an err {:?}", _e);})
+
+}
+
+
+fn main() {
+    env_logger::init_from_env(env_logger::Env::default().default_filter_or("warn"));
+    info!("starting {:?}", Local::now().time().to_string());
+    let region = Region::UsEast1;
+    let client = get_ec2_client(region.clone());
+    let x = VpcStream::all(client).collect();
+    let y = just_print(x);
+    tokio::run(y);
     info!("done {:?}", Local::now().time().to_string());
 }
