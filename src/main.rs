@@ -34,9 +34,11 @@ use rusoto_cloudtrail::{
     LookupAttribute,
     Event
 };
+
 mod vpc_stream;
+mod events_stream;
 use vpc_stream::VpcStream;
-//use rusoto_sts::{StsClient, StsAssumeRoleSessionCredentialsProvider};
+use events_stream::EventStream;
 
 
 fn regions() ->  &'static [Region]{
@@ -241,21 +243,68 @@ fn _main() {
     info!("done {:?}", Local::now().time().to_string());
 }
 
-pub fn just_print<T, E>(f: impl Future<Item=T, Error=E>) -> impl Future<Item=(), Error=()>
-    where T: fmt::Debug, E: fmt::Debug {
-    f.map(|v| {println!("got a result {:?}", v);} )
-        .map_err(|_e| {println!("got an err {:?}", _e);})
 
+pub fn handle_error(e: LookupEventsError) {
+    if let LookupEventsError::Unknown(http_error) = e {
+        let s = str::from_utf8(&http_error.body).unwrap();
+        println!("LookupEventsError : {:?}, {:?}", http_error.status, s);
+    } else {
+        println!("Other events error {:?}", e);
+    };
 }
 
+pub fn just_print_events<T>(f: impl Future<Item=T, Error=LookupEventsError>) -> impl Future<Item=(), Error=()>
+    where T: fmt::Debug {
+    f.map(|v| {println!("got a result {:?}", v);} )
+        .map_err(|_e| {handle_error(_e);})
+}
+
+pub fn just_print_vpcs<T>(f: impl Future<Item=T, Error=DescribeVpcsError>) -> impl Future<Item=(), Error=()>
+    where T: fmt::Debug {
+    f.map(|v| {println!("got a result {:?}", v);} )
+        .map_err(|_e| {
+            if let DescribeVpcsError::Unknown(http_error) = _e {
+                let s = str::from_utf8(&http_error.body).unwrap();
+                println!("LookupEventsError : {:?}, {:?}", http_error.status, s);
+            } else {
+                println!("Other vpcs error {:?}", _e);
+            };
+
+        })
+}
+
+
+fn print_events(region: Region, vpc_id: String) {
+//    let region = Region::UsEast1;
+    let client = get_events_client(region);
+//    let vpc_id = "vpc-0e1005da09603b42a".to_string();
+    let _vpc_id = vpc_id.clone();
+    let events = EventStream::all_per_vpc(client, vpc_id);
+    let x =  events.filter(|event| {
+        event.event_name.as_ref().unwrap().contains("CreateVpc")
+    }).map(move |event| {
+        println!("event = vpc {:?} created on {:?} by {:?}", _vpc_id, event.event_time.as_ref().unwrap(), event.username.as_ref().unwrap());
+    });
+    let y = x.collect()
+        .map(|_e| { println!("done");})
+        .map_err(|_e| {handle_error(_e);});
+//    let y = just_print_events(x.collect());
+    tokio::spawn(y);
+}
+
+fn print_vpcs() {
+    let region = Region::UsEast1;
+    let client = get_ec2_client(region.clone());
+    let x = VpcStream::all(client).map(
+         move |vpc| {print_events(region.clone(), vpc.vpc_id.unwrap())}
+    ).collect();
+    let y = just_print_vpcs(x);
+    tokio::run(y);
+}
 
 fn main() {
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("warn"));
     info!("starting {:?}", Local::now().time().to_string());
-    let region = Region::UsEast1;
-    let client = get_ec2_client(region.clone());
-    let x = VpcStream::all(client).collect();
-    let y = just_print(x);
-    tokio::run(y);
+    print_vpcs();
     info!("done {:?}", Local::now().time().to_string());
 }

@@ -89,7 +89,6 @@ impl Stream for VpcStream {
                         Err(From::from(e))
                 },
             }
-
         }
 
         }
