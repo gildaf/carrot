@@ -10,6 +10,9 @@ use rusoto_cloudtrail::{
     Event
 };
 
+use serde_json::from_slice;
+use serde_json::Value as SerdeJsonValue;
+
 enum Token {
     StartToken,
     TokenFromResponse(Option<String>),
@@ -75,12 +78,40 @@ impl Stream for EventStream {
                         self.poll()
                     },
                     Ok(Async::NotReady) => {
+//                        let r = &request;
+//                        let vpc_id = &r.lookup_attributes.as_ref().unwrap()[0].attribute_value;
+//                        println!("not ready in  {}", vpc_id);
                         self.state = Some(EventStreamState::EventStreamWait{ client, request, future });
                         Ok(Async::NotReady)
                     },
                     Err(e) => {
-                        Err(From::from(e))
-                    },
+//                        pub fn handle_error(e: LookupEventsError) {
+//                        if let LookupEventsError::Unknown(http_error) = e {
+                        let r = &request;
+                        let vpc_id = &r.lookup_attributes.as_ref().unwrap()[0].attribute_value;
+                        println!("error in  {}", vpc_id);
+                        match e {
+                            LookupEventsError::Unknown(http_error) => {
+                                let json = from_slice::<SerdeJsonValue>(&http_error.body).unwrap();
+                                let err_type = json.get("__type").and_then(|e| e.as_str()).unwrap_or("Unknown");
+                                let is_throttling = err_type.contains("ThrottlingException");
+                                if is_throttling {
+                                    println!("throttling in  {}", vpc_id);
+                                    self.state = Some(EventStreamState::EventStreamWait{ client, request, future });
+                                    Ok(Async::NotReady)
+                                    // this is a problem.
+                                    // if we return NotReady after the future has returned an error
+                                    // we need to somehow trigger the runtime to call us again.  
+                                } else {
+                                    Err(LookupEventsError::from_response(http_error))
+                                }
+//                                let s = str::from_utf8(&http_error.body).unwrap();
+                            },
+                            _ => {
+                                Err(From::from(e))
+                            }
+                        }
+                    }
                 }
             },
             EventStreamState::EventStreamResult{ client, mut request, token, mut event_stream} => {

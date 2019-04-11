@@ -1,5 +1,6 @@
 #[macro_use] extern crate log;
 extern crate env_logger;
+extern crate serde_json;
 extern crate rusoto_core;
 extern crate rusoto_ec2;
 extern crate rusoto_cloudtrail;
@@ -253,11 +254,6 @@ pub fn handle_error(e: LookupEventsError) {
     };
 }
 
-pub fn just_print_events<T>(f: impl Future<Item=T, Error=LookupEventsError>) -> impl Future<Item=(), Error=()>
-    where T: fmt::Debug {
-    f.map(|v| {println!("got a result {:?}", v);} )
-        .map_err(|_e| {handle_error(_e);})
-}
 
 pub fn just_print_vpcs<T>(f: impl Future<Item=T, Error=DescribeVpcsError>) -> impl Future<Item=(), Error=()>
     where T: fmt::Debug {
