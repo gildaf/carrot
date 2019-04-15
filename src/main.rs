@@ -5,6 +5,7 @@ extern crate rusoto_core;
 extern crate rusoto_ec2;
 extern crate rusoto_cloudtrail;
 
+#[macro_use]
 extern crate futures;
 extern crate tokio;
 extern crate chrono;
@@ -275,6 +276,8 @@ fn print_events(region: Region, vpc_id: String) {
     let client = get_events_client(region);
 //    let vpc_id = "vpc-0e1005da09603b42a".to_string();
     let _vpc_id = vpc_id.clone();
+    let vpc_id1 = vpc_id.clone();
+    let vpc_id2 = vpc_id.clone();
     let events = EventStream::all_per_vpc(client, vpc_id);
     let x =  events.filter(|event| {
         event.event_name.as_ref().unwrap().contains("CreateVpc")
@@ -282,11 +285,13 @@ fn print_events(region: Region, vpc_id: String) {
         println!("event = vpc {:?} created on {:?} by {:?}", _vpc_id, event.event_time.as_ref().unwrap(), event.username.as_ref().unwrap());
     });
     let y = x.collect()
-        .map(|_e| { println!("done");})
+        .map(move |_e| { println!("done collecting streams for {:?}", vpc_id1);})
         .map_err(|_e| {handle_error(_e);});
 //    let y = just_print_events(x.collect());
+    println!("starting to collect streams for {:?}", vpc_id2);
     tokio::spawn(y);
 }
+
 
 fn print_vpcs() {
     let region = Region::UsEast1;

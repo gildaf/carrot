@@ -1,3 +1,4 @@
+use std::time::{Duration, Instant};
 use std::string::String;
 use futures::prelude::*;
 use rusoto_core::{
@@ -10,6 +11,7 @@ use rusoto_cloudtrail::{
     Event
 };
 
+use tokio::timer::Delay;
 use serde_json::from_slice;
 use serde_json::Value as SerdeJsonValue;
 
@@ -20,19 +22,42 @@ enum Token {
 
 pub struct EventStream {
     state: Option<EventStreamState>,
+    vpc_id: String,
 }
 
+
 enum EventStreamState {
-    EventStreamWait {
+    EventStreamWaitResult {
         client: CloudTrailClient,
         request: LookupEventsRequest,
         future: RusotoFuture<LookupEventsResponse, LookupEventsError>,
+    },
+    EventStreamThrottled {
+        client: CloudTrailClient,
+        request: LookupEventsRequest,
+        delay: Delay,
     },
     EventStreamResult {
         client: CloudTrailClient,
         request: LookupEventsRequest,
         token: Option<String>,
         event_stream: Box<futures::stream::Stream<Item=Event, Error=LookupEventsError> + Send>
+    }
+}
+
+impl EventStreamState {
+    fn vpc_id(&self) -> &str {
+        match self {
+            EventStreamState::EventStreamWaitResult { client: _, ref request, ..} => {
+                request.lookup_attributes.as_ref().unwrap()[0].attribute_value.as_ref()
+            },
+            EventStreamState::EventStreamThrottled { client: _ , ref request, ..} => {
+                request.lookup_attributes.as_ref().unwrap()[0].attribute_value.as_ref()
+            },
+            EventStreamState::EventStreamResult { client: _ , ref request, ..} => {
+                request.lookup_attributes.as_ref().unwrap()[0].attribute_value.as_ref()
+            },
+        }
     }
 }
 
@@ -55,10 +80,11 @@ fn _vpc_events_request(vpc_id: String, token: Option<String>) -> LookupEventsReq
 
 impl EventStream {
     pub fn all_per_vpc(client: CloudTrailClient, vpc_id: String) -> EventStream {
-        let request = _vpc_events_request(vpc_id, None);
+        let request = _vpc_events_request(vpc_id.clone(), None);
         let future = client.lookup_events(request.clone());
         EventStream {
-            state: Some(EventStreamState::EventStreamWait{ client, request, future })
+            state: Some(EventStreamState::EventStreamWaitResult { client, request, future}),
+            vpc_id,
         }
     }
 }
@@ -68,7 +94,7 @@ impl Stream for EventStream {
     type Error = LookupEventsError;
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
         match self.state.take().expect("Stream called twice after exhaustion") {
-            EventStreamState::EventStreamWait { client, request, mut future } => {
+            EventStreamState::EventStreamWaitResult { client, request, mut future } => {
                 match future.poll() {
                     Ok(Async::Ready(result)) => {
 //                        let  LookupEventsResponse { events, next_token } = result;
@@ -78,36 +104,30 @@ impl Stream for EventStream {
                         self.poll()
                     },
                     Ok(Async::NotReady) => {
-//                        let r = &request;
-//                        let vpc_id = &r.lookup_attributes.as_ref().unwrap()[0].attribute_value;
-//                        println!("not ready in  {}", vpc_id);
-                        self.state = Some(EventStreamState::EventStreamWait{ client, request, future });
+//                        println!("not ready in  {}", self.vpc_id.as_str());
+                        self.state = Some(EventStreamState::EventStreamWaitResult { client, request, future});
                         Ok(Async::NotReady)
                     },
                     Err(e) => {
 //                        pub fn handle_error(e: LookupEventsError) {
 //                        if let LookupEventsError::Unknown(http_error) = e {
-                        let r = &request;
-                        let vpc_id = &r.lookup_attributes.as_ref().unwrap()[0].attribute_value;
-                        println!("error in  {}", vpc_id);
+                        let vpc_id = self.vpc_id.as_str();
                         match e {
                             LookupEventsError::Unknown(http_error) => {
                                 let json = from_slice::<SerdeJsonValue>(&http_error.body).unwrap();
                                 let err_type = json.get("__type").and_then(|e| e.as_str()).unwrap_or("Unknown");
                                 let is_throttling = err_type.contains("ThrottlingException");
                                 if is_throttling {
-                                    println!("throttling in  {}", vpc_id);
-                                    self.state = Some(EventStreamState::EventStreamWait{ client, request, future });
-                                    Ok(Async::NotReady)
-                                    // this is a problem.
-                                    // if we return NotReady after the future has returned an error
-                                    // we need to somehow trigger the runtime to call us again.  
+                                    info!("{}: Got throttled on lookup_events", vpc_id);
+                                    let when = Instant::now() + Duration::from_millis(100);
+                                    self.state = Some(EventStreamState::EventStreamThrottled { client, request, delay: Delay::new(when)});
+                                    self.poll()
                                 } else {
                                     Err(LookupEventsError::from_response(http_error))
                                 }
-//                                let s = str::from_utf8(&http_error.body).unwrap();
                             },
                             _ => {
+                                error!("{}: error in lookup events", vpc_id);
                                 Err(From::from(e))
                             }
                         }
@@ -125,7 +145,7 @@ impl Stream for EventStream {
                             Some(token) => {
                                 request.next_token = Some(token);
                                 let future = client.lookup_events(request.clone());
-                                self.state = Some(EventStreamState::EventStreamWait { client, request, future });
+                                self.state = Some(EventStreamState::EventStreamWaitResult { client, request, future });
                                 self.poll()
                             },
                             None => {
@@ -135,6 +155,8 @@ impl Stream for EventStream {
                         }
                     },
                     Ok(Async::NotReady) => {
+                        // this should never happen
+                        panic!("this should never happen");
                         self.state = None;
                         Ok(Async::NotReady)
                     },
@@ -142,7 +164,31 @@ impl Stream for EventStream {
                         Err(From::from(e))
                     },
                 }
-            }
+            },
+            EventStreamState::EventStreamThrottled {client, request, mut delay} => {
+                debug!("{}: checking throttling", self.vpc_id.as_str());
+
+                match delay.poll() {
+                    Ok(Async::Ready(_)) => {
+                        debug!("{}: delay is ready. calling lookup_events again", self.vpc_id.as_str());
+                        let future = client.lookup_events(request.clone());
+                        self.state = Some(EventStreamState::EventStreamWaitResult { client, request, future});
+                        self.poll()
+                    },
+                    Ok(Async::NotReady) => {
+                        debug!("{}: delay is not ready yet", self.vpc_id.as_str());
+                        self.state = Some(EventStreamState::EventStreamThrottled { client, request, delay });
+                        Ok(Async::NotReady)
+                    },
+                    Err(_) => {
+
+                        // The delay can fail if the Tokio runtime is unavailable.
+                        // for now, the error is ignored.
+                        panic!("delay failed");
+                        Err(LookupEventsError::ParseError("delay failed".to_string()))
+                    },
+                }
+            },
         }
     }
 }
