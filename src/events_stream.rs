@@ -34,8 +34,8 @@ enum EventStreamState {
     },
     EventStreamResult {
         request: LookupEventsRequest,
-        token: Option<String>,
-        event_stream: Box<futures::stream::Stream<Item=Event, Error=LookupEventsError> + Send>
+        next_token: Option<String>,
+        my_stream: Box<futures::stream::Stream<Item=Event, Error=LookupEventsError> + Send>
     }
 }
 
@@ -94,9 +94,9 @@ impl Stream for EventStream {
             EventStreamState::EventStreamWaitResult { request, mut future } => {
                 match future.poll() {
                     Ok(Async::Ready(result)) => {
-                        let token = result.next_token.clone();
-                        let event_stream = Box::new(futures::stream::iter_ok(result.events.unwrap()));
-                        self.state = Some(EventStreamState::EventStreamResult { request, token, event_stream });
+                        let next_token = result.next_token.clone();
+                        let my_stream = Box::new(futures::stream::iter_ok(result.events.unwrap()));
+                        self.state = Some(EventStreamState::EventStreamResult { request, next_token, my_stream });
                         self.poll()
                     },
                     Ok(Async::NotReady) => {
@@ -118,14 +118,14 @@ impl Stream for EventStream {
                     }
                 }
             },
-            EventStreamState::EventStreamResult{ mut request, token, mut event_stream} => {
-                match event_stream.poll() {
+            EventStreamState::EventStreamResult{ mut request, next_token, mut my_stream} => {
+                match my_stream.poll() {
                     Ok(Async::Ready(Some(event))) => {
-                        self.state = Some(EventStreamState::EventStreamResult { request, token, event_stream});
+                        self.state = Some(EventStreamState::EventStreamResult { request, next_token, my_stream});
                         Ok(Async::Ready(Some(event)))
                     },
                     Ok(Async::Ready(None)) => {
-                        match token {
+                        match next_token {
                             Some(token) => {
                                 request.next_token = Some(token);
                                 let future = self.client.lookup_events(request.clone());
@@ -133,7 +133,7 @@ impl Stream for EventStream {
                                 self.poll()
                             },
                             None => {
-                                self.state = Some(EventStreamState::EventStreamResult { request, token, event_stream});
+                                self.state = Some(EventStreamState::EventStreamResult { request, next_token, my_stream});
                                 Ok(Async::Ready(None))
                             }
                         }
@@ -185,7 +185,10 @@ impl IsThrottle for LookupEventsError {
         match &self {
             &LookupEventsError::Unknown(http_error) => {
                 let json = from_slice::<SerdeJsonValue>(&http_error.body).unwrap();
-                let err_type = json.get("__type").and_then(|e| e.as_str()).unwrap_or("Unknown");
+                let err_type = json
+                    .get("__type")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("Unknown");
                 return err_type == "ThrottlingException"
             },
             _ => {
@@ -195,12 +198,6 @@ impl IsThrottle for LookupEventsError {
     }
 }
 
-//fn is_throttling<T>(unknown_error: T::Unknown) {
-//let http_error = &unknown_error.0 ;
-//let json = from_slice::<SerdeJsonValue>(&http_error.body).unwrap();
-//let err_type = json.get("__type").and_then(|e| e.as_str()).unwrap_or("Unknown");
-//let is_throttling = err_type.contains("ThrottlingException");
-//}
 
 #[cfg(test)]
 mod tests {
