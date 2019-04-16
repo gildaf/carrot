@@ -15,10 +15,6 @@ use tokio::timer::Delay;
 use serde_json::from_slice;
 use serde_json::Value as SerdeJsonValue;
 
-enum Token {
-    StartToken,
-    TokenFromResponse(Option<String>),
-}
 
 pub struct EventStream {
     state: Option<EventStreamState>,
@@ -45,6 +41,7 @@ enum EventStreamState {
     }
 }
 
+
 impl EventStreamState {
     fn vpc_id(&self) -> &str {
         match self {
@@ -60,6 +57,7 @@ impl EventStreamState {
         }
     }
 }
+
 
 fn _vpc_events_request(vpc_id: String, token: Option<String>) -> LookupEventsRequest {
     let attrs = vec![
@@ -97,39 +95,26 @@ impl Stream for EventStream {
             EventStreamState::EventStreamWaitResult { client, request, mut future } => {
                 match future.poll() {
                     Ok(Async::Ready(result)) => {
-//                        let  LookupEventsResponse { events, next_token } = result;
                         let token = result.next_token.clone();
                         let event_stream = Box::new(futures::stream::iter_ok(result.events.unwrap()));
                         self.state = Some(EventStreamState::EventStreamResult { client, request, token, event_stream });
                         self.poll()
                     },
                     Ok(Async::NotReady) => {
-//                        println!("not ready in  {}", self.vpc_id.as_str());
+                        debug!("{}: not ready ", self.vpc_id.as_str());
                         self.state = Some(EventStreamState::EventStreamWaitResult { client, request, future});
                         Ok(Async::NotReady)
                     },
                     Err(e) => {
-//                        pub fn handle_error(e: LookupEventsError) {
-//                        if let LookupEventsError::Unknown(http_error) = e {
                         let vpc_id = self.vpc_id.as_str();
-                        match e {
-                            LookupEventsError::Unknown(http_error) => {
-                                let json = from_slice::<SerdeJsonValue>(&http_error.body).unwrap();
-                                let err_type = json.get("__type").and_then(|e| e.as_str()).unwrap_or("Unknown");
-                                let is_throttling = err_type.contains("ThrottlingException");
-                                if is_throttling {
-                                    info!("{}: Got throttled on lookup_events", vpc_id);
-                                    let when = Instant::now() + Duration::from_millis(100);
-                                    self.state = Some(EventStreamState::EventStreamThrottled { client, request, delay: Delay::new(when)});
-                                    self.poll()
-                                } else {
-                                    Err(LookupEventsError::from_response(http_error))
-                                }
-                            },
-                            _ => {
-                                error!("{}: error in lookup events", vpc_id);
-                                Err(From::from(e))
-                            }
+                        if e.is_throttle() {
+                            info!("{}: Got throttled on lookup_events", vpc_id);
+                            let when = Instant::now() + Duration::from_millis(100);
+                            self.state = Some(EventStreamState::EventStreamThrottled { client, request, delay: Delay::new(when)});
+                            self.poll()
+                        } else {
+                            error!("{}: error in lookup events", vpc_id);
+                            Err(e)
                         }
                     }
                 }
@@ -161,13 +146,12 @@ impl Stream for EventStream {
                         Ok(Async::NotReady)
                     },
                     Err(e) => {
-                        Err(From::from(e))
+                        Err(e)
                     },
                 }
             },
             EventStreamState::EventStreamThrottled {client, request, mut delay} => {
                 debug!("{}: checking throttling", self.vpc_id.as_str());
-
                 match delay.poll() {
                     Ok(Async::Ready(_)) => {
                         debug!("{}: delay is ready. calling lookup_events again", self.vpc_id.as_str());
@@ -190,5 +174,51 @@ impl Stream for EventStream {
                 }
             },
         }
+    }
+}
+
+pub trait IsThrottle {
+    fn is_throttle(&self) -> bool;
+}
+
+impl IsThrottle for LookupEventsError {
+    fn is_throttle(&self) -> bool{
+        match &self {
+            &LookupEventsError::Unknown(http_error) => {
+                let json = from_slice::<SerdeJsonValue>(&http_error.body).unwrap();
+                let err_type = json.get("__type").and_then(|e| e.as_str()).unwrap_or("Unknown");
+                return err_type == "ThrottlingException"
+            },
+            _ => {
+                false
+            }
+        }
+    }
+}
+
+//fn is_throttling<T>(unknown_error: T::Unknown) {
+//let http_error = &unknown_error.0 ;
+//let json = from_slice::<SerdeJsonValue>(&http_error.body).unwrap();
+//let err_type = json.get("__type").and_then(|e| e.as_str()).unwrap_or("Unknown");
+//let is_throttling = err_type.contains("ThrottlingException");
+//}
+
+#[cfg(test)]
+mod tests {
+
+    // Note this useful idiom: importing names from outer (for mod tests) scope.
+    use super::*;
+    use rusoto_mock::{MockCredentialsProvider, MockRequestDispatcher};
+
+    #[test]
+    fn test_event_stream_simple() {
+        let client = CloudTrailClient::new_with(
+            MockRequestDispatcher::with_status(200),
+            MockCredentialsProvider,
+            Default::default()
+        );
+
+        let stream = EventStream::all_per_vpc(client, "vpc-1234".to_string());
+        assert_eq!(stream.vpc_id.as_str(), "vpc-1234");
     }
 }

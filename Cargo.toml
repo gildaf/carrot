@@ -16,3 +16,6 @@ futures = "0.1.25"
 tokio = "0.1.17"
 chrono = "0.4"
 serde_json = "1.0.39"
+
+[dev-dependencies]
+rusoto_mock = "0.30.0"
