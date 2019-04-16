@@ -17,6 +17,7 @@ use serde_json::Value as SerdeJsonValue;
 
 
 pub struct EventStream {
+    client: CloudTrailClient,
     state: Option<EventStreamState>,
     vpc_id: String,
 }
@@ -24,17 +25,14 @@ pub struct EventStream {
 
 enum EventStreamState {
     EventStreamWaitResult {
-        client: CloudTrailClient,
         request: LookupEventsRequest,
         future: RusotoFuture<LookupEventsResponse, LookupEventsError>,
     },
     EventStreamThrottled {
-        client: CloudTrailClient,
         request: LookupEventsRequest,
         delay: Delay,
     },
     EventStreamResult {
-        client: CloudTrailClient,
         request: LookupEventsRequest,
         token: Option<String>,
         event_stream: Box<futures::stream::Stream<Item=Event, Error=LookupEventsError> + Send>
@@ -45,13 +43,13 @@ enum EventStreamState {
 impl EventStreamState {
     fn vpc_id(&self) -> &str {
         match self {
-            EventStreamState::EventStreamWaitResult { client: _, ref request, ..} => {
+            EventStreamState::EventStreamWaitResult { ref request, ..} => {
                 request.lookup_attributes.as_ref().unwrap()[0].attribute_value.as_ref()
             },
-            EventStreamState::EventStreamThrottled { client: _ , ref request, ..} => {
+            EventStreamState::EventStreamThrottled { ref request, ..} => {
                 request.lookup_attributes.as_ref().unwrap()[0].attribute_value.as_ref()
             },
-            EventStreamState::EventStreamResult { client: _ , ref request, ..} => {
+            EventStreamState::EventStreamResult { ref request, ..} => {
                 request.lookup_attributes.as_ref().unwrap()[0].attribute_value.as_ref()
             },
         }
@@ -81,7 +79,8 @@ impl EventStream {
         let request = _vpc_events_request(vpc_id.clone(), None);
         let future = client.lookup_events(request.clone());
         EventStream {
-            state: Some(EventStreamState::EventStreamWaitResult { client, request, future}),
+            client,
+            state: Some(EventStreamState::EventStreamWaitResult { request, future}),
             vpc_id,
         }
     }
@@ -92,17 +91,17 @@ impl Stream for EventStream {
     type Error = LookupEventsError;
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
         match self.state.take().expect("Stream called twice after exhaustion") {
-            EventStreamState::EventStreamWaitResult { client, request, mut future } => {
+            EventStreamState::EventStreamWaitResult { request, mut future } => {
                 match future.poll() {
                     Ok(Async::Ready(result)) => {
                         let token = result.next_token.clone();
                         let event_stream = Box::new(futures::stream::iter_ok(result.events.unwrap()));
-                        self.state = Some(EventStreamState::EventStreamResult { client, request, token, event_stream });
+                        self.state = Some(EventStreamState::EventStreamResult { request, token, event_stream });
                         self.poll()
                     },
                     Ok(Async::NotReady) => {
                         debug!("{}: not ready ", self.vpc_id.as_str());
-                        self.state = Some(EventStreamState::EventStreamWaitResult { client, request, future});
+                        self.state = Some(EventStreamState::EventStreamWaitResult { request, future});
                         Ok(Async::NotReady)
                     },
                     Err(e) => {
@@ -110,7 +109,7 @@ impl Stream for EventStream {
                         if e.is_throttle() {
                             info!("{}: Got throttled on lookup_events", vpc_id);
                             let when = Instant::now() + Duration::from_millis(100);
-                            self.state = Some(EventStreamState::EventStreamThrottled { client, request, delay: Delay::new(when)});
+                            self.state = Some(EventStreamState::EventStreamThrottled { request, delay: Delay::new(when)});
                             self.poll()
                         } else {
                             error!("{}: error in lookup events", vpc_id);
@@ -119,22 +118,22 @@ impl Stream for EventStream {
                     }
                 }
             },
-            EventStreamState::EventStreamResult{ client, mut request, token, mut event_stream} => {
+            EventStreamState::EventStreamResult{ mut request, token, mut event_stream} => {
                 match event_stream.poll() {
                     Ok(Async::Ready(Some(event))) => {
-                        self.state = Some(EventStreamState::EventStreamResult { client, request, token, event_stream});
+                        self.state = Some(EventStreamState::EventStreamResult { request, token, event_stream});
                         Ok(Async::Ready(Some(event)))
                     },
                     Ok(Async::Ready(None)) => {
                         match token {
                             Some(token) => {
                                 request.next_token = Some(token);
-                                let future = client.lookup_events(request.clone());
-                                self.state = Some(EventStreamState::EventStreamWaitResult { client, request, future });
+                                let future = self.client.lookup_events(request.clone());
+                                self.state = Some(EventStreamState::EventStreamWaitResult { request, future });
                                 self.poll()
                             },
                             None => {
-                                self.state = Some(EventStreamState::EventStreamResult { client, request, token, event_stream});
+                                self.state = Some(EventStreamState::EventStreamResult { request, token, event_stream});
                                 Ok(Async::Ready(None))
                             }
                         }
@@ -150,18 +149,18 @@ impl Stream for EventStream {
                     },
                 }
             },
-            EventStreamState::EventStreamThrottled {client, request, mut delay} => {
+            EventStreamState::EventStreamThrottled {request, mut delay} => {
                 debug!("{}: checking throttling", self.vpc_id.as_str());
                 match delay.poll() {
                     Ok(Async::Ready(_)) => {
                         debug!("{}: delay is ready. calling lookup_events again", self.vpc_id.as_str());
-                        let future = client.lookup_events(request.clone());
-                        self.state = Some(EventStreamState::EventStreamWaitResult { client, request, future});
+                        let future = self.client.lookup_events(request.clone());
+                        self.state = Some(EventStreamState::EventStreamWaitResult { request, future});
                         self.poll()
                     },
                     Ok(Async::NotReady) => {
                         debug!("{}: delay is not ready yet", self.vpc_id.as_str());
-                        self.state = Some(EventStreamState::EventStreamThrottled { client, request, delay });
+                        self.state = Some(EventStreamState::EventStreamThrottled { request, delay });
                         Ok(Async::NotReady)
                     },
                     Err(_) => {
