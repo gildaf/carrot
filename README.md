@@ -1,6 +1,6 @@
 cross regional aws client for getting info about active VPCs
 
-# env variables
+# Environment Variables
 * AWS_CREDENTIALS:
     * description: full path the aws credentials file. 
     * default: ~/.aws/credentials
@@ -8,8 +8,12 @@ cross regional aws client for getting info about active VPCs
     * description: aws profile name to use
     * default: "default"
 
-# building
-* cargo build --release
+# Building
+```bash
+cargo build --release
+```
 
-#running
-*  AWS_PROFILE=myprofile target/release/carrot
+# Running
+```bash
+AWS_PROFILE=<profile-name> target/release/carrot
+```
