@@ -12,4 +12,4 @@ cross regional aws client for getting info about active VPCs
 * cargo build --release
 
 #running
-*  AWS_PROFILE=gil=qa target/release/carrot
+*  AWS_PROFILE=myprofile target/release/carrot

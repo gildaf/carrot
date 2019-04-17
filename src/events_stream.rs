@@ -40,23 +40,6 @@ enum EventStreamState {
 }
 
 
-impl EventStreamState {
-    fn vpc_id(&self) -> &str {
-        match self {
-            EventStreamState::EventStreamWaitResult { ref request, ..} => {
-                request.lookup_attributes.as_ref().unwrap()[0].attribute_value.as_ref()
-            },
-            EventStreamState::EventStreamThrottled { ref request, ..} => {
-                request.lookup_attributes.as_ref().unwrap()[0].attribute_value.as_ref()
-            },
-            EventStreamState::EventStreamResult { ref request, ..} => {
-                request.lookup_attributes.as_ref().unwrap()[0].attribute_value.as_ref()
-            },
-        }
-    }
-}
-
-
 fn _vpc_events_request(vpc_id: String, token: Option<String>) -> LookupEventsRequest {
     let attrs = vec![
         LookupAttribute{
@@ -74,6 +57,7 @@ fn _vpc_events_request(vpc_id: String, token: Option<String>) -> LookupEventsReq
     request
 }
 
+
 impl EventStream {
     pub fn all_per_vpc(client: CloudTrailClient, vpc_id: String) -> EventStream {
         let request = _vpc_events_request(vpc_id.clone(), None);
@@ -85,6 +69,7 @@ impl EventStream {
         }
     }
 }
+
 
 impl Stream for EventStream {
     type Item = Event;
@@ -140,9 +125,7 @@ impl Stream for EventStream {
                     },
                     Ok(Async::NotReady) => {
                         // this should never happen
-                        panic!("this should never happen");
-                        self.state = None;
-                        Ok(Async::NotReady)
+                        panic!("this should never happen")
                     },
                     Err(e) => {
                         Err(e)
@@ -168,7 +151,6 @@ impl Stream for EventStream {
                         // The delay can fail if the Tokio runtime is unavailable.
                         // for now, the error is ignored.
                         panic!("delay failed");
-                        Err(LookupEventsError::ParseError("delay failed".to_string()))
                     },
                 }
             },
@@ -176,14 +158,16 @@ impl Stream for EventStream {
     }
 }
 
+
 pub trait IsThrottle {
     fn is_throttle(&self) -> bool;
 }
 
+
 impl IsThrottle for LookupEventsError {
     fn is_throttle(&self) -> bool{
-        match &self {
-            &LookupEventsError::Unknown(http_error) => {
+        match self {
+            LookupEventsError::Unknown(http_error) => {
                 let json = from_slice::<SerdeJsonValue>(&http_error.body).unwrap();
                 let err_type = json
                     .get("__type")

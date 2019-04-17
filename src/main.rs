@@ -5,11 +5,9 @@ extern crate rusoto_core;
 extern crate rusoto_ec2;
 extern crate rusoto_cloudtrail;
 
-#[macro_use]
 extern crate futures;
 extern crate tokio;
 extern crate chrono;
-//extern crate rusoto_sts;
 
 
 use std::env::var as env_var;
@@ -17,25 +15,18 @@ use tokio::prelude::*;
 use chrono::prelude::*;
 use std::{str, fmt};
 
-use std::collections::HashMap;
 use std::path::PathBuf;
-use futures::lazy;
-use futures::future::Map;
-
 use dirs::home_dir;
 use rusoto_core::{Region, HttpClient};
 use rusoto_core::credential::ProfileProvider;
 use rusoto_ec2::{
-    Ec2Client, Ec2,
-    DescribeVpcsRequest, DescribeVpcsResult, DescribeVpcsError,
+    Ec2Client,
+    DescribeVpcsError,
 };
 use rusoto_cloudtrail::{
     CloudTrailClient,
-    CloudTrail,
-    LookupEventsRequest,
     LookupEventsError,
-    LookupAttribute,
-    Event
+    Event,
 };
 
 mod vpc_stream;
@@ -145,7 +136,7 @@ impl VpcInfo {
         for event in events {
             let Event{ event_name, username, event_time, ..} = event ;
             if let Some(name) = event_name {
-                if name == "CreateVpc".to_string() {
+                if name == "CreateVpc" {
                     vpc_info.created_by = username;
                     vpc_info.creation_time = event_time;
                 }
