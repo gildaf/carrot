@@ -66,7 +66,7 @@ impl Stream for VpcStream {
                     });
                     Ok(Async::NotReady)
                 }
-                Err(e) => Err(From::from(e)),
+                Err(e) => Err(e),
             },
             VpcStreamState::VpcStreamResult {
                 client,
