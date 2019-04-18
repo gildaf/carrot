@@ -10,9 +10,8 @@ extern crate chrono;
 extern crate futures;
 extern crate tokio;
 
-use chrono::prelude::*;
 use std::env::var as env_var;
-use std::{fmt, str};
+use std::str;
 use tokio::prelude::*;
 
 use dirs::home_dir;
@@ -23,8 +22,10 @@ use rusoto_ec2::{DescribeVpcsError, Ec2Client};
 use std::path::PathBuf;
 
 mod events_stream;
+mod vpc_info;
 mod vpc_stream;
 use events_stream::EventStream;
+use vpc_info::VpcInfo;
 use vpc_stream::VpcStream;
 
 fn regions() -> &'static [Region] {
@@ -85,67 +86,6 @@ fn get_ec2_client(region: Region) -> Ec2Client {
     client
 }
 
-type VpcID = String;
-
-struct VpcInfo {
-    vpc_id: VpcID,
-    region: Region,
-    creation_time: Option<f64>,
-    created_by: Option<String>,
-}
-
-impl VpcInfo {
-    fn new(vpc_id: VpcID, region: Region) -> VpcInfo {
-        VpcInfo {
-            vpc_id,
-            region,
-            creation_time: None,
-            created_by: None,
-        }
-    }
-
-    fn from_events(vpc_id: VpcID, region: Region, events: Vec<Event>) -> VpcInfo {
-        let mut vpc_info = VpcInfo::new(vpc_id, region);
-        for event in events {
-            let Event {
-                event_name,
-                username,
-                event_time,
-                ..
-            } = event;
-            if let Some(name) = event_name {
-                if name == "CreateVpc" {
-                    vpc_info.created_by = username;
-                    vpc_info.creation_time = event_time;
-                }
-            }
-        }
-        vpc_info
-    }
-}
-
-impl fmt::Debug for VpcInfo {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let creation_time = match &self.creation_time {
-            &Some(time) => NaiveDateTime::from_timestamp(time.round() as i64, 0).to_string(),
-            None => "Unknown".to_string(),
-        };
-        let created_by = match &self.created_by {
-            &Some(ref username) => username.as_str(),
-            None => "Unknown",
-        };
-
-        write!(
-            f,
-            "vpc: {} ({:?}), created by {} on {}",
-            self.vpc_id.as_str(),
-            self.region,
-            created_by,
-            creation_time
-        )
-    }
-}
-
 pub fn handle_error(e: LookupEventsError) {
     if let LookupEventsError::Unknown(http_error) = e {
         let s = str::from_utf8(&http_error.body).unwrap();
@@ -164,22 +104,22 @@ pub fn handle_vpcs_error(e: DescribeVpcsError) {
     };
 }
 
-//        pub type Poll<T, E> = Result<Async<T>, E>;
 fn get_vpc_info(
     region: Region,
     vpc_id: String,
 ) -> impl Future<Item = VpcInfo, Error = LookupEventsError> {
     let client = get_events_client(region.clone());
-    let events = EventStream::all_per_vpc(client, vpc_id.clone());
-    let x = events
+    let events_stream = EventStream::all_per_vpc(client, vpc_id.clone());
+    let relevant_events = events_stream
         .filter(|event| event.event_name.as_ref().unwrap().contains("CreateVpc"))
         .collect();
     info!("starting to collect streams for {:?}", &vpc_id);
-    let y = x.map(move |events: Vec<Event>| VpcInfo::from_events(vpc_id, region, events));
-    y
+    let vpc_info =
+        relevant_events.map(move |events: Vec<Event>| VpcInfo::from_events(vpc_id, region, events));
+    vpc_info
 }
 
-fn print_vpcs(region: Region) {
+fn get_vpcs_info(region: Region) {
     let client = get_ec2_client(region.clone());
     let x = VpcStream::all(client).for_each(move |vpc| {
         let z = get_vpc_info(region.clone(), vpc.vpc_id.unwrap())
@@ -200,7 +140,7 @@ fn main() {
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("warn"));
     warn!("starting");
     for region in regions() {
-        print_vpcs(region.clone());
+        get_vpcs_info(region.clone());
     }
     warn!("done");
 }
