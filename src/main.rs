@@ -14,6 +14,7 @@ use future::lazy;
 use std::env::var as env_var;
 use std::str;
 use tokio::prelude::*;
+use tokio::sync::mpsc::{channel, Sender};
 
 use dirs::home_dir;
 use rusoto_cloudtrail::{CloudTrailClient, Event, LookupEventsError};
@@ -30,23 +31,24 @@ use vpc_info::VpcInfo;
 use vpc_stream::VpcStream;
 
 fn regions() -> &'static [Region] {
-    &[
-        Region::ApNortheast1,
-        Region::ApNortheast2,
-        Region::ApSouth1,
-        Region::ApSoutheast1,
-        Region::ApSoutheast2,
-        Region::CaCentral1,
-        Region::EuCentral1,
-        Region::EuWest1,
-        Region::EuWest2,
-        Region::EuWest3,
-        Region::SaEast1,
-        Region::UsEast1,
-        Region::UsEast2,
-        Region::UsWest1,
-        Region::UsWest2,
-    ]
+//    &[
+//        Region::ApNortheast1,
+//        Region::ApNortheast2,
+//        Region::ApSouth1,
+//        Region::ApSoutheast1,
+//        Region::ApSoutheast2,
+//        Region::CaCentral1,
+//        Region::EuCentral1,
+//        Region::EuWest1,
+//        Region::EuWest2,
+//        Region::EuWest3,
+//        Region::SaEast1,
+//        Region::UsEast1,
+//        Region::UsEast2,
+//        Region::UsWest1,
+//        Region::UsWest2,
+//    ]
+    &[Region::UsEast1]
 }
 
 fn default_aws_creds_location() -> Result<PathBuf, &'static str> {
@@ -103,7 +105,7 @@ pub fn handle_vpcs_error(e: DescribeVpcsError) {
     };
 }
 
-fn get_vpc_info(region: Region, vpc_id: String) -> impl Future<Item = VpcInfo, Error = ()> {
+fn load_vpc_info(region: Region, vpc_id: String) -> impl Future<Item = VpcInfo, Error = ()> {
     let client = get_events_client(region.clone());
     let events_stream = EventStream::all_per_vpc(client, vpc_id.clone());
     let relevant_events = events_stream
@@ -117,12 +119,19 @@ fn get_vpc_info(region: Region, vpc_id: String) -> impl Future<Item = VpcInfo, E
     relevant_events.map(move |events: Vec<Event>| VpcInfo::from_events(vpc_id, region, events))
 }
 
-fn get_vpcs_info(region: Region) -> impl Future<Item = (), Error = DescribeVpcsError> {
+fn collect_vpcs_info(region: Region, tx: Sender<VpcInfo>) -> impl Future<Item = (), Error = DescribeVpcsError> {
+
     let client = get_ec2_client(region.clone());
     let vpc_to_vpc_info = move |vpc: Vpc| {
-        get_vpc_info(region.clone(), vpc.vpc_id.unwrap()).map(|vpc_info: VpcInfo| {
-            println!("{:?}", vpc_info);
-        })
+        let tx = tx.clone();
+        let vpc_id = vpc.vpc_id.unwrap();
+        load_vpc_info(region.clone(), vpc_id)
+            .and_then(|vpc_info: VpcInfo| {
+                tx.send(vpc_info)
+                    .map(|e| {debug!("good {:?}", e); })
+                    .map_err(|e| { debug!("sender failed {:?}", e); })
+            })
+            .map_err(|_e| {error!("failure");} )
     };
     VpcStream::all(client).for_each(move |vpc| {
         tokio::spawn(vpc_to_vpc_info(vpc));
@@ -130,12 +139,21 @@ fn get_vpcs_info(region: Region) -> impl Future<Item = (), Error = DescribeVpcsE
     })
 }
 
-fn get_all_info() -> Result<(), ()> {
+use std::collections::HashMap;
+fn get_all_info() -> impl Future<Item = (), Error = ()> {
+    let (tx, rx) = channel::<VpcInfo>(100);
     regions().iter().for_each(|region| {
-        let vpcs_future = get_vpcs_info(region.clone()).map_err(handle_vpcs_error);
+        let vpcs_future = collect_vpcs_info(region.clone(), tx.clone()).map_err(handle_vpcs_error);
         tokio::spawn(vpcs_future);
     });
-    Ok(())
+
+
+//    let mut knowns :HashMap<String, Vec<VpcInfo>> = HashMap::new();
+    rx.for_each(|value| {
+        println!("2. VpcInfo = {:?}", value);
+        Ok(())
+    })
+    .map_err(|e| {error!("reciever failed!! {:?}", e)})
 }
 
 fn main() {
