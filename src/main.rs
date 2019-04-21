@@ -16,6 +16,8 @@ use std::env::var as env_var;
 use std::str;
 use tokio::prelude::*;
 use tokio::sync::mpsc::{channel, Sender};
+use tokio::sync::mpsc::error::{SendError};
+
 
 use dirs::home_dir;
 use rusoto_cloudtrail::{CloudTrailClient, Event, LookupEventsError};
@@ -87,47 +89,86 @@ fn get_ec2_client(region: Region) -> Ec2Client {
     Ec2Client::new_with(HttpClient::new().unwrap(), profile_provider(), region)
 }
 
-fn load_vpc_info(region: Region, vpc_id: String) -> impl Future<Item = VpcInfo, Error = ()> {
+fn load_vpc_info(region: Region, vpc_id: String) -> impl Future<Item = VpcInfo, Error = Failure> {
     let client = get_events_client(region.clone());
     let events_stream = EventStream::all_per_vpc(client, vpc_id.clone());
     let relevant_events = events_stream
-        .map_err(|e| {
-            handle_events_error(e);
-        })
+        .map_err(Failure::from)
         .filter(|event| event.event_name.as_ref().unwrap().contains("CreateVpc"))
         .collect();
     info!("starting to collect streams for {:?}", &vpc_id);
 
-    relevant_events.map(move |events: Vec<Event>| VpcInfo::from_events(vpc_id, region, events))
+    relevant_events.map(move |events: Vec<Event>| {
+        VpcInfo::from_events(vpc_id, region, events)
+    })
+}
+
+#[derive(Debug)]
+pub enum Failure {
+    DescribeVpcsFailed(String),
+    LookUpEventsFailed(String),
+    SendingVpcInfoFailed(String),
+}
+
+impl From<LookupEventsError> for Failure {
+    fn from(e: LookupEventsError) -> Self {
+        if let LookupEventsError::Unknown(http_error) = e {
+            let s = str::from_utf8(&http_error.body).unwrap();
+            error!("LookupEventsError : {:?}, {:?}", &http_error.status, s);
+            Failure::LookUpEventsFailed(s.to_string())
+        } else {
+            let msg = format!("{:?}", e);
+            Failure::LookUpEventsFailed(msg)
+        }
+    }
+}
+
+impl From<DescribeVpcsError> for Failure {
+    fn from(e: DescribeVpcsError) -> Self {
+        if let DescribeVpcsError::Unknown(http_error) = e {
+            let s = str::from_utf8(&http_error.body).unwrap();
+            error!("DescribeVpcsError: {:?}, {:?}", &http_error.status, s);
+            Failure::DescribeVpcsFailed(s.to_string())
+        } else {
+            let msg = format!("{:?}", e);
+            Failure::DescribeVpcsFailed(msg)
+        }
+    }
+}
+
+impl From<SendError> for Failure {
+    fn from(e: SendError) -> Self {
+        let msg = format!("{:?}", e);
+        Failure::SendingVpcInfoFailed(msg)
+    }
 }
 
 fn collect_vpcs_info(
     region: Region,
     sender: Sender<VpcInfo>,
-) -> impl Future<Item = (), Error = DescribeVpcsError> {
+) -> impl Future<Item = (), Error = Failure> {
     let client = get_ec2_client(region.clone());
     let vpc_to_vpc_info = move |vpc: Vpc| {
         let sender = sender.clone();
         let vpc_id = vpc.vpc_id.unwrap();
         load_vpc_info(region.clone(), vpc_id)
-            .and_then(|vpc_info: VpcInfo| {
+            .and_then(|vpc_info| {
                 sender
                     .send(vpc_info)
-                    .map(|e| {
-                        debug!("good {:?}", e);
+                    .map(|result| {
+                        debug!("good {:?}", result);
                     })
-                    .map_err(|e| {
-                        debug!("sender failed {:?}", e);
-                    })
+                    .map_err(Failure::from)
             })
-            .map_err(|_e| {
-                error!("failure");
-            })
+            .map_err(|err: Failure| {
+                error!("failure {:?}", err);
+                }
+            )
     };
     VpcStream::all(client).for_each(move |vpc| {
         tokio::spawn(vpc_to_vpc_info(vpc));
         Ok(())
-    })
+    }).map_err(Failure::from)
 }
 
 fn print_info<T>(all_vpc_infos: Vec<VpcInfo>) -> Result<(), T> {
@@ -166,29 +207,11 @@ fn print_info<T>(all_vpc_infos: Vec<VpcInfo>) -> Result<(), T> {
     Ok(())
 }
 
-pub fn handle_events_error(e: LookupEventsError) {
-    if let LookupEventsError::Unknown(http_error) = e {
-        let s = str::from_utf8(&http_error.body).unwrap();
-        error!("LookupEventsError : {:?}, {:?}", http_error.status, s);
-    } else {
-        error!("Other events error {:?}", e);
-    };
-}
-
-pub fn handle_vpcs_error(e: DescribeVpcsError) {
-    if let DescribeVpcsError::Unknown(http_error) = e {
-        let s = str::from_utf8(&http_error.body).unwrap();
-        error!("LookupEventsError : {:?}, {:?}", http_error.status, s);
-    } else {
-        error!("Other vpcs error {:?}", e);
-    };
-}
-
 fn get_all_info() -> impl Future<Item = (), Error = ()> {
     let (sender, receiver) = channel::<VpcInfo>(100);
     regions().iter().for_each(|region| {
         let sender = sender.clone();
-        let vpcs_future = collect_vpcs_info(region.clone(), sender).map_err(handle_vpcs_error);
+        let vpcs_future = collect_vpcs_info(region.clone(), sender).map_err(|e| {error!("{:?}", e);});
         tokio::spawn(vpcs_future);
     });
 
