@@ -87,21 +87,12 @@ fn get_ec2_client(region: Region) -> Ec2Client {
     Ec2Client::new_with(HttpClient::new().unwrap(), profile_provider(), region)
 }
 
-pub fn handle_error(e: LookupEventsError) {
-    if let LookupEventsError::Unknown(http_error) = e {
-        let s = str::from_utf8(&http_error.body).unwrap();
-        error!("LookupEventsError : {:?}, {:?}", http_error.status, s);
-    } else {
-        error!("Other events error {:?}", e);
-    };
-}
-
 fn load_vpc_info(region: Region, vpc_id: String) -> impl Future<Item = VpcInfo, Error = ()> {
     let client = get_events_client(region.clone());
     let events_stream = EventStream::all_per_vpc(client, vpc_id.clone());
     let relevant_events = events_stream
         .map_err(|e| {
-            handle_error(e);
+            handle_events_error(e);
         })
         .filter(|event| event.event_name.as_ref().unwrap().contains("CreateVpc"))
         .collect();
@@ -112,15 +103,16 @@ fn load_vpc_info(region: Region, vpc_id: String) -> impl Future<Item = VpcInfo, 
 
 fn collect_vpcs_info(
     region: Region,
-    tx: Sender<VpcInfo>,
+    sender: Sender<VpcInfo>,
 ) -> impl Future<Item = (), Error = DescribeVpcsError> {
     let client = get_ec2_client(region.clone());
     let vpc_to_vpc_info = move |vpc: Vpc| {
-        let tx = tx.clone();
+        let sender = sender.clone();
         let vpc_id = vpc.vpc_id.unwrap();
         load_vpc_info(region.clone(), vpc_id)
             .and_then(|vpc_info: VpcInfo| {
-                tx.send(vpc_info)
+                sender
+                    .send(vpc_info)
                     .map(|e| {
                         debug!("good {:?}", e);
                     })
@@ -138,7 +130,23 @@ fn collect_vpcs_info(
     })
 }
 
-fn print_info(knowns: HashMap<String, Vec<VpcInfo>>, unknowns: Vec<VpcInfo>) {
+fn print_info<T>(all_vpc_infos: Vec<VpcInfo>) -> Result<(), T> {
+    let mut knowns: HashMap<String, Vec<VpcInfo>> = HashMap::new();
+    let mut unknowns: Vec<VpcInfo> = Vec::new();
+    for vpc_info in all_vpc_infos {
+        match vpc_info.created_by() {
+            Some(name) => {
+                if let Some(vpc_infos) = knowns.get_mut(name.as_str()) {
+                    vpc_infos.push(vpc_info)
+                } else {
+                    knowns.insert(name.clone(), vec![vpc_info]);
+                }
+            }
+            None => {
+                unknowns.push(vpc_info);
+            }
+        }
+    }
     println!(
         "knowns length= {}, unknowns length = {}",
         &knowns.len(),
@@ -155,6 +163,16 @@ fn print_info(knowns: HashMap<String, Vec<VpcInfo>>, unknowns: Vec<VpcInfo>) {
     for vpc_info in unknowns {
         println!("\t{:?}", vpc_info);
     }
+    Ok(())
+}
+
+pub fn handle_events_error(e: LookupEventsError) {
+    if let LookupEventsError::Unknown(http_error) = e {
+        let s = str::from_utf8(&http_error.body).unwrap();
+        error!("LookupEventsError : {:?}, {:?}", http_error.status, s);
+    } else {
+        error!("Other events error {:?}", e);
+    };
 }
 
 pub fn handle_vpcs_error(e: DescribeVpcsError) {
@@ -167,32 +185,15 @@ pub fn handle_vpcs_error(e: DescribeVpcsError) {
 }
 
 fn get_all_info() -> impl Future<Item = (), Error = ()> {
-    let (tx, rx) = channel::<VpcInfo>(100);
+    let (sender, receiver) = channel::<VpcInfo>(100);
     regions().iter().for_each(|region| {
-        let vpcs_future = collect_vpcs_info(region.clone(), tx.clone()).map_err(handle_vpcs_error);
+        let sender = sender.clone();
+        let vpcs_future = collect_vpcs_info(region.clone(), sender).map_err(handle_vpcs_error);
         tokio::spawn(vpcs_future);
     });
 
-    rx.collect()
-        .map(|all_vpc_infos: Vec<VpcInfo>| {
-            let mut knowns: HashMap<String, Vec<VpcInfo>> = HashMap::new();
-            let mut unknowns: Vec<VpcInfo> = Vec::new();
-            for vpc_info in all_vpc_infos {
-                match vpc_info.created_by() {
-                    Some(name) => {
-                        if let Some(vpc_infos) = knowns.get_mut(name.as_str()) {
-                            vpc_infos.push(vpc_info)
-                        } else {
-                            knowns.insert(name.clone(), vec![vpc_info]);
-                        }
-                    }
-                    None => {
-                        unknowns.push(vpc_info);
-                    }
-                }
-            }
-            print_info(knowns, unknowns)
-        })
+    receiver.collect()
+        .and_then(print_info)
         .map_err(|e| error!("receiver failed!! {:?}", e))
 }
 

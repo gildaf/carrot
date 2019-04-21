@@ -3,7 +3,7 @@ use rusoto_cloudtrail::Event;
 use rusoto_core::Region;
 use std::fmt;
 
-type VpcID = String;
+pub type VpcID = String;
 
 pub struct VpcInfo {
     vpc_id: VpcID,
