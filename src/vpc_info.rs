@@ -40,6 +40,10 @@ impl VpcInfo {
         }
         vpc_info
     }
+
+    pub fn created_by(&self) -> Option<&String> {
+        self.created_by.as_ref()
+    }
 }
 
 impl fmt::Debug for VpcInfo {

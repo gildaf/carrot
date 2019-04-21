@@ -11,6 +11,7 @@ extern crate futures;
 extern crate tokio;
 
 use future::lazy;
+use std::collections::HashMap;
 use std::env::var as env_var;
 use std::str;
 use tokio::prelude::*;
@@ -31,24 +32,23 @@ use vpc_info::VpcInfo;
 use vpc_stream::VpcStream;
 
 fn regions() -> &'static [Region] {
-//    &[
-//        Region::ApNortheast1,
-//        Region::ApNortheast2,
-//        Region::ApSouth1,
-//        Region::ApSoutheast1,
-//        Region::ApSoutheast2,
-//        Region::CaCentral1,
-//        Region::EuCentral1,
-//        Region::EuWest1,
-//        Region::EuWest2,
-//        Region::EuWest3,
-//        Region::SaEast1,
-//        Region::UsEast1,
-//        Region::UsEast2,
-//        Region::UsWest1,
-//        Region::UsWest2,
-//    ]
-    &[Region::UsEast1]
+    &[
+        Region::ApNortheast1,
+        Region::ApNortheast2,
+        Region::ApSouth1,
+        Region::ApSoutheast1,
+        Region::ApSoutheast2,
+        Region::CaCentral1,
+        Region::EuCentral1,
+        Region::EuWest1,
+        Region::EuWest2,
+        Region::EuWest3,
+        Region::SaEast1,
+        Region::UsEast1,
+        Region::UsEast2,
+        Region::UsWest1,
+        Region::UsWest2,
+    ]
 }
 
 fn default_aws_creds_location() -> Result<PathBuf, &'static str> {
@@ -90,18 +90,9 @@ fn get_ec2_client(region: Region) -> Ec2Client {
 pub fn handle_error(e: LookupEventsError) {
     if let LookupEventsError::Unknown(http_error) = e {
         let s = str::from_utf8(&http_error.body).unwrap();
-        println!("LookupEventsError : {:?}, {:?}", http_error.status, s);
-    } else {
-        println!("Other events error {:?}", e);
-    };
-}
-
-pub fn handle_vpcs_error(e: DescribeVpcsError) {
-    if let DescribeVpcsError::Unknown(http_error) = e {
-        let s = str::from_utf8(&http_error.body).unwrap();
         error!("LookupEventsError : {:?}, {:?}", http_error.status, s);
     } else {
-        error!("Other vpcs error {:?}", e);
+        error!("Other events error {:?}", e);
     };
 }
 
@@ -119,8 +110,10 @@ fn load_vpc_info(region: Region, vpc_id: String) -> impl Future<Item = VpcInfo, 
     relevant_events.map(move |events: Vec<Event>| VpcInfo::from_events(vpc_id, region, events))
 }
 
-fn collect_vpcs_info(region: Region, tx: Sender<VpcInfo>) -> impl Future<Item = (), Error = DescribeVpcsError> {
-
+fn collect_vpcs_info(
+    region: Region,
+    tx: Sender<VpcInfo>,
+) -> impl Future<Item = (), Error = DescribeVpcsError> {
     let client = get_ec2_client(region.clone());
     let vpc_to_vpc_info = move |vpc: Vpc| {
         let tx = tx.clone();
@@ -128,10 +121,16 @@ fn collect_vpcs_info(region: Region, tx: Sender<VpcInfo>) -> impl Future<Item = 
         load_vpc_info(region.clone(), vpc_id)
             .and_then(|vpc_info: VpcInfo| {
                 tx.send(vpc_info)
-                    .map(|e| {debug!("good {:?}", e); })
-                    .map_err(|e| { debug!("sender failed {:?}", e); })
+                    .map(|e| {
+                        debug!("good {:?}", e);
+                    })
+                    .map_err(|e| {
+                        debug!("sender failed {:?}", e);
+                    })
             })
-            .map_err(|_e| {error!("failure");} )
+            .map_err(|_e| {
+                error!("failure");
+            })
     };
     VpcStream::all(client).for_each(move |vpc| {
         tokio::spawn(vpc_to_vpc_info(vpc));
@@ -139,7 +138,34 @@ fn collect_vpcs_info(region: Region, tx: Sender<VpcInfo>) -> impl Future<Item = 
     })
 }
 
-use std::collections::HashMap;
+fn print_info(knowns: HashMap<String, Vec<VpcInfo>>, unknowns: Vec<VpcInfo>) {
+    println!(
+        "knowns length= {}, unknowns length = {}",
+        &knowns.len(),
+        &unknowns.len()
+    );
+    for (user, vpc_infos) in knowns {
+        println!("user: {}", user);
+        for vpc_info in vpc_infos {
+            println!("\t{:?}", vpc_info);
+        }
+    }
+    println!("############################################################");
+    println!("unknowns:");
+    for vpc_info in unknowns {
+        println!("\t{:?}", vpc_info);
+    }
+}
+
+pub fn handle_vpcs_error(e: DescribeVpcsError) {
+    if let DescribeVpcsError::Unknown(http_error) = e {
+        let s = str::from_utf8(&http_error.body).unwrap();
+        error!("LookupEventsError : {:?}, {:?}", http_error.status, s);
+    } else {
+        error!("Other vpcs error {:?}", e);
+    };
+}
+
 fn get_all_info() -> impl Future<Item = (), Error = ()> {
     let (tx, rx) = channel::<VpcInfo>(100);
     regions().iter().for_each(|region| {
@@ -147,13 +173,27 @@ fn get_all_info() -> impl Future<Item = (), Error = ()> {
         tokio::spawn(vpcs_future);
     });
 
-
-//    let mut knowns :HashMap<String, Vec<VpcInfo>> = HashMap::new();
-    rx.for_each(|value| {
-        println!("2. VpcInfo = {:?}", value);
-        Ok(())
-    })
-    .map_err(|e| {error!("reciever failed!! {:?}", e)})
+    rx.collect()
+        .map(|all_vpc_infos: Vec<VpcInfo>| {
+            let mut knowns: HashMap<String, Vec<VpcInfo>> = HashMap::new();
+            let mut unknowns: Vec<VpcInfo> = Vec::new();
+            for vpc_info in all_vpc_infos {
+                match vpc_info.created_by() {
+                    Some(name) => {
+                        if let Some(vpc_infos) = knowns.get_mut(name.as_str()) {
+                            vpc_infos.push(vpc_info)
+                        } else {
+                            knowns.insert(name.clone(), vec![vpc_info]);
+                        }
+                    }
+                    None => {
+                        unknowns.push(vpc_info);
+                    }
+                }
+            }
+            print_info(knowns, unknowns)
+        })
+        .map_err(|e| error!("receiver failed!! {:?}", e))
 }
 
 fn main() {
