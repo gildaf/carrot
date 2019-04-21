@@ -1,6 +1,6 @@
-use std::str;
 use rusoto_cloudtrail::LookupEventsError;
 use rusoto_ec2::DescribeVpcsError;
+use std::str;
 use tokio::sync::mpsc::error::SendError;
 
 #[derive(Debug)]
