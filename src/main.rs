@@ -16,22 +16,22 @@ use std::env::var as env_var;
 use std::str;
 use tokio::prelude::*;
 use tokio::sync::mpsc::{channel, Sender};
-use tokio::sync::mpsc::error::{SendError};
-
 
 use dirs::home_dir;
-use rusoto_cloudtrail::{CloudTrailClient, Event, LookupEventsError};
+use rusoto_cloudtrail::{CloudTrailClient, Event};
 use rusoto_core::credential::ProfileProvider;
 use rusoto_core::{HttpClient, Region};
-use rusoto_ec2::{DescribeVpcsError, Ec2Client, Vpc};
+use rusoto_ec2::{Ec2Client, Vpc};
 use std::path::PathBuf;
 
 mod events_stream;
 mod vpc_info;
 mod vpc_stream;
+mod errors;
 use events_stream::EventStream;
 use vpc_info::VpcInfo;
 use vpc_stream::VpcStream;
+use errors::Failure;
 
 fn regions() -> &'static [Region] {
     &[
@@ -101,46 +101,6 @@ fn load_vpc_info(region: Region, vpc_id: String) -> impl Future<Item = VpcInfo, 
     relevant_events.map(move |events: Vec<Event>| {
         VpcInfo::from_events(vpc_id, region, events)
     })
-}
-
-#[derive(Debug)]
-pub enum Failure {
-    DescribeVpcsFailed(String),
-    LookUpEventsFailed(String),
-    SendingVpcInfoFailed(String),
-}
-
-impl From<LookupEventsError> for Failure {
-    fn from(e: LookupEventsError) -> Self {
-        if let LookupEventsError::Unknown(http_error) = e {
-            let s = str::from_utf8(&http_error.body).unwrap();
-            error!("LookupEventsError : {:?}, {:?}", &http_error.status, s);
-            Failure::LookUpEventsFailed(s.to_string())
-        } else {
-            let msg = format!("{:?}", e);
-            Failure::LookUpEventsFailed(msg)
-        }
-    }
-}
-
-impl From<DescribeVpcsError> for Failure {
-    fn from(e: DescribeVpcsError) -> Self {
-        if let DescribeVpcsError::Unknown(http_error) = e {
-            let s = str::from_utf8(&http_error.body).unwrap();
-            error!("DescribeVpcsError: {:?}, {:?}", &http_error.status, s);
-            Failure::DescribeVpcsFailed(s.to_string())
-        } else {
-            let msg = format!("{:?}", e);
-            Failure::DescribeVpcsFailed(msg)
-        }
-    }
-}
-
-impl From<SendError> for Failure {
-    fn from(e: SendError) -> Self {
-        let msg = format!("{:?}", e);
-        Failure::SendingVpcInfoFailed(msg)
-    }
 }
 
 fn collect_vpcs_info(
