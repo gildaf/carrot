@@ -25,7 +25,7 @@ mod events_stream;
 mod vpc_info;
 mod vpc_stream;
 use aws::{profile_provider, regions};
-use errors::Failure;
+use errors::CarrotError;
 use events_stream::EventStream;
 use vpc_info::VpcInfo;
 use vpc_stream::VpcStream;
@@ -38,11 +38,11 @@ fn get_ec2_client(region: Region) -> Ec2Client {
     Ec2Client::new_with(HttpClient::new().unwrap(), profile_provider(), region)
 }
 
-fn load_vpc_info(region: Region, vpc_id: String) -> impl Future<Item = VpcInfo, Error = Failure> {
+fn load_vpc_info(region: Region, vpc_id: String) -> impl Future<Item = VpcInfo, Error = CarrotError> {
     let client = get_events_client(region.clone());
     let events_stream = EventStream::all_per_vpc(client, vpc_id.clone());
     let relevant_events = events_stream
-        .map_err(Failure::from)
+        .map_err(CarrotError::from)
         .filter(|event| event.event_name.as_ref().unwrap().contains("CreateVpc"))
         .collect();
     info!("starting to collect streams for {:?}", &vpc_id);
@@ -53,7 +53,7 @@ fn load_vpc_info(region: Region, vpc_id: String) -> impl Future<Item = VpcInfo, 
 fn collect_vpcs_info(
     region: Region,
     sender: Sender<VpcInfo>,
-) -> impl Future<Item = (), Error = Failure> {
+) -> impl Future<Item = (), Error = CarrotError> {
     let client = get_ec2_client(region.clone());
     let vpc_to_vpc_info = move |vpc: Vpc| {
         let sender = sender.clone();
@@ -65,9 +65,9 @@ fn collect_vpcs_info(
                     .map(|result| {
                         debug!("good {:?}", result);
                     })
-                    .map_err(Failure::from)
+                    .map_err(CarrotError::from)
             })
-            .map_err(|err: Failure| {
+            .map_err(|err: CarrotError| {
                 error!("failure {:?}", err);
             })
     };
@@ -76,7 +76,7 @@ fn collect_vpcs_info(
             tokio::spawn(vpc_to_vpc_info(vpc));
             Ok(())
         })
-        .map_err(Failure::from)
+        .map_err(CarrotError::from)
 }
 
 fn print_info<T>(all_vpc_infos: Vec<VpcInfo>) -> Result<(), T> {
