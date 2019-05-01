@@ -79,7 +79,7 @@ fn collect_vpcs_info(
         .map_err(CarrotError::from)
 }
 
-fn print_info<T>(all_vpc_infos: Vec<VpcInfo>) -> Result<(), T> {
+fn print_info(all_vpc_infos: Vec<VpcInfo>) -> Result<(), ()> {
     let mut knowns: HashMap<String, Vec<VpcInfo>> = HashMap::new();
     let mut unknowns: Vec<VpcInfo> = Vec::new();
     for vpc_info in all_vpc_infos {
@@ -115,7 +115,7 @@ fn print_info<T>(all_vpc_infos: Vec<VpcInfo>) -> Result<(), T> {
     Ok(())
 }
 
-fn get_all_info() -> impl Future<Item = (), Error = ()> {
+fn get_all_info() -> impl Future<Item = Vec<VpcInfo>, Error = ()> {
     let (sender, receiver) = channel::<VpcInfo>(100);
     regions().iter().for_each(|region| {
         let sender = sender.clone();
@@ -127,13 +127,14 @@ fn get_all_info() -> impl Future<Item = (), Error = ()> {
 
     receiver
         .collect()
-        .and_then(print_info)
         .map_err(|e| error!("receiver failed!! {:?}", e))
 }
 
 fn main() {
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("warn"));
     warn!("starting");
-    tokio::run(lazy(get_all_info));
+    let mut runtime = tokio::runtime::current_thread::Runtime::new().expect("failed to start new Runtime");
+    let vpcs_info: Vec<VpcInfo> = runtime.block_on(lazy(get_all_info)).expect("there was an error.");
     warn!("done");
+    print_info(vpcs_info).unwrap();
 }
